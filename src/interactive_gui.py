@@ -19,10 +19,45 @@ sys.path.insert(0, str(Path(__file__).parent))
 from interactive_test import InteractiveTester, discover_bots, get_bot_path_startup
 
 
+def get_icon_path():
+    """Get the path to icon.ico - works both in Python and PyInstaller executable"""
+    import sys
+    
+    # For PyInstaller executable
+    if getattr(sys, 'frozen', False):
+        # Running as executable
+        base_path = sys._MEIPASS
+        icon_path = os.path.join(base_path, "icon.ico")
+        if os.path.exists(icon_path):
+            return icon_path
+    
+    # For normal Python execution - check project root
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    icon_path = os.path.join(project_root, "icon.ico")
+    if os.path.exists(icon_path):
+        return icon_path
+    
+    # Try current working directory as fallback
+    if os.path.exists("icon.ico"):
+        return os.path.abspath("icon.ico")
+    
+    return None
+
+
 class BotTesterGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Bot Interactive Tester")
+        self.root.title("Interactive Bot Tester")
+        
+        # Set icon BEFORE any other window operations
+        icon_path = get_icon_path()
+        if icon_path:
+            try:
+                self.root.iconbitmap(default=icon_path)
+                self.root.after(10, lambda: self.root.iconbitmap(default=icon_path))  # Ensure it sticks
+            except Exception as e:
+                pass  # Icon loading failed, continue without it
+        
         self.root.geometry("1000x700")
         self.root.minsize(800, 600)
         
@@ -276,7 +311,14 @@ class BotTesterGUI:
             bot_name = self.tester.bot_name
             bot_type = (self.tester.bot_type or 'unknown').capitalize()
             self.title_label.configure(text=f"Bot: {bot_name} ({bot_type})")
-            self.bot_info_label.configure(text=f"Route: {self.tester.webhook_route} | State: {len(self.tester.bot_state)} vars")
+            
+            # Build bot info with author if available
+            info_parts = [f"Route: {self.tester.webhook_route}", f"State: {len(self.tester.bot_state)} vars"]
+            if hasattr(self.tester, 'manifest_info') and self.tester.manifest_info:
+                author = self.tester.manifest_info.get('author')
+                if author:
+                    info_parts.insert(0, f"Author: {author}")
+            self.bot_info_label.configure(text=" | ".join(info_parts))
             
             # Update user combo with available dummies
             self.user_combo.configure(values=list(self.tester.dummies.keys()))
@@ -287,6 +329,14 @@ class BotTesterGUI:
             self.chat_display.delete(1.0, tk.END)
             bot_type_label = "Flask" if self.tester.bot_type == 'flask' else "Polling"
             self.chat_display.insert(tk.END, f"✓ Loaded: {bot_name} ({bot_type_label} bot)\n")
+            
+            # Show manifest info if available
+            if hasattr(self.tester, 'manifest_info') and self.tester.manifest_info:
+                manifest = self.tester.manifest_info
+                self.chat_display.insert(tk.END, f"✓ Manifest: {manifest.get('name', 'N/A')} by {manifest.get('author', 'N/A')}\n")
+            else:
+                self.chat_display.insert(tk.END, f"✓ No manifest.json found (using filename)\n")
+            
             self.chat_display.insert(tk.END, f"✓ Route: {self.tester.webhook_route}\n")
             self.chat_display.insert(tk.END, f"✓ State vars: {', '.join(self.tester.bot_state.keys())}\n\n")
             self.chat_display.config(state=tk.DISABLED)

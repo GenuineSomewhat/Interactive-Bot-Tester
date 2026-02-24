@@ -6,6 +6,7 @@ Auto-discovers Flask bots in the current directory.
 
 import os
 import sys
+import json
 import importlib.util
 from urllib.parse import urlparse
 from unittest.mock import patch, MagicMock
@@ -16,6 +17,42 @@ try:
     from PIL import Image
 except Exception:
     Image = None
+
+
+def load_manifest(bot_dir):
+    """
+    Load manifest.json from the bot directory if it exists.
+    
+    Args:
+        bot_dir: Directory containing the bot file
+    
+    Returns:
+        Dictionary with manifest data, or None if not found
+    """
+    manifest_path = os.path.join(bot_dir, 'manifest.json')
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8-sig') as f:  # utf-8-sig handles BOM
+                content = f.read().strip()
+                if not content:
+                    print(f"[WARNING] manifest.json is empty")
+                    return None
+                manifest = json.loads(content)
+                return manifest
+        except json.JSONDecodeError as e:
+            print(f"[WARNING] Failed to parse manifest.json: {e}")
+            # Try to read and display the content for debugging
+            try:
+                with open(manifest_path, 'rb') as f:
+                    raw_content = f.read()
+                    print(f"[DEBUG] Raw manifest bytes (first 100): {raw_content[:100]}")
+            except Exception:
+                pass
+            return None
+        except IOError as e:
+            print(f"[WARNING] Failed to read manifest.json: {e}")
+            return None
+    return None
 
 
 def discover_bots(search_dir=None):
@@ -354,6 +391,7 @@ class InteractiveTester:
         self.bot_state = {}
         self.webhook_route = "/"  # Will be updated by _load_bot
         self.bot_type = None  # 'flask' or 'polling'
+        self.manifest_info = None  # Store manifest data if loaded
         self._load_bot()
         
         self.sent_messages = []
@@ -371,37 +409,57 @@ class InteractiveTester:
     def _load_bot(self):
         """Load the bot module."""
         try:
-            # Auto-detect bot type by analyzing the code
-            with open(self.bot_module_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()  # Read entire file for better detection
-                
-                # Strong polling indicators
-                has_watch_for_messages = 'watch_for_messages' in content or 'while True:' in content and 'groupme_api' in content
-                has_groupme_api = content.count('groupme_api(') > 1  # Multiple API calls
-                has_send_message_func = 'def send_message(' in content or 'send_message(' in content
-                
-                # Strong Flask indicators (actual Flask app instantiation, not just imports)
-                has_flask_app = 'app = Flask(' in content or 'app=Flask(' in content
-                has_flask_routes = '@app.route(' in content or '@app.post(' in content
-                
-                # Score-based detection
-                polling_score = 0
-                flask_score = 0
-                
-                if has_watch_for_messages:
-                    polling_score += 10  # Very strong indicator
-                if has_groupme_api:
-                    polling_score += 5
-                if has_send_message_func:
-                    polling_score += 3
-                
-                if has_flask_app:
-                    flask_score += 10  # Very strong indicator
-                if has_flask_routes:
-                    flask_score += 5
-                
-                # Determine bot type based on scores
-                is_polling = polling_score > flask_score
+            # Try to load manifest first
+            bot_dir = os.path.dirname(os.path.abspath(self.bot_module_path))
+            manifest = load_manifest(bot_dir)
+            
+            # Extract bot name from manifest if available
+            if manifest:
+                self.manifest_info = manifest  # Store for GUI display
+                bot_name_override = manifest.get('name')
+                if bot_name_override:
+                    self.bot_name = bot_name_override
+                print(f"[INFO] Loaded manifest: {manifest.get('name', 'Unknown')} by {manifest.get('author', 'Unknown')}")
+            else:
+                print(f"[INFO] No manifest.json found in {bot_dir}")
+            
+            # Determine bot type from manifest or auto-detect
+            if manifest and 'type' in manifest:
+                # Use manifest to determine bot type
+                manifest_type = manifest.get('type', '').lower()
+                is_polling = manifest_type == 'polling'
+            else:
+                # Auto-detect bot type by analyzing the code
+                with open(self.bot_module_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()  # Read entire file for better detection
+                    
+                    # Strong polling indicators
+                    has_watch_for_messages = 'watch_for_messages' in content or 'while True:' in content and 'groupme_api' in content
+                    has_groupme_api = content.count('groupme_api(') > 1  # Multiple API calls
+                    has_send_message_func = 'def send_message(' in content or 'send_message(' in content
+                    
+                    # Strong Flask indicators (actual Flask app instantiation, not just imports)
+                    has_flask_app = 'app = Flask(' in content or 'app=Flask(' in content
+                    has_flask_routes = '@app.route(' in content or '@app.post(' in content
+                    
+                    # Score-based detection
+                    polling_score = 0
+                    flask_score = 0
+                    
+                    if has_watch_for_messages:
+                        polling_score += 10  # Very strong indicator
+                    if has_groupme_api:
+                        polling_score += 5
+                    if has_send_message_func:
+                        polling_score += 3
+                    
+                    if has_flask_app:
+                        flask_score += 10  # Very strong indicator
+                    if has_flask_routes:
+                        flask_score += 5
+                    
+                    # Determine bot type based on scores
+                    is_polling = polling_score > flask_score
             
             if is_polling:
                 # Polling bot

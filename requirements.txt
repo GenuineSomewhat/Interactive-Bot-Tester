@@ -1,0 +1,15 @@
+# Bot Interactive Tester - Dependencies
+
+# Core dependencies
+flask>=2.3.0
+requests>=2.31.0
+
+# GUI dependencies
+customtkinter>=5.2.0
+pillow>=10.0.0
+
+# Build dependencies (optional - only needed for creating executables)
+# pyinstaller>=6.0.0
+
+# Testing dependencies (optional)
+# pytest>=7.4.0
