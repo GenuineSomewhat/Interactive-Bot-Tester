@@ -1,0 +1,56 @@
+name: Auto Build Executable
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'icon.ico'
+      - 'build_gui.spec'
+      - 'requirements.txt'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller>=6.19.0
+      
+      - name: Build executable
+        run: |
+          python -m PyInstaller build_gui.spec
+      
+      - name: List generated files
+        run: |
+          dir packages\
+          dir packages\Interactive*
+      
+      - name: Commit and push packages folder
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add packages/
+          git commit -m "Auto-build: Generate executable from latest commit" || echo "No changes to commit"
+          git push origin main
+        continue-on-error: true
+      
+      - name: Upload executable as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Interactive-Bot-Tester-Windows
+          path: packages/Interactive Bot Tester/
+          retention-days: 30
