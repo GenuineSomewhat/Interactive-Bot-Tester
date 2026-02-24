@@ -49,7 +49,7 @@ jobs:
         continue-on-error: true
       
       - name: Upload executable as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Interactive-Bot-Tester-Windows
           path: packages/Interactive Bot Tester/
