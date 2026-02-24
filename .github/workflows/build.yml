@@ -16,7 +16,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: Linux
+            artifact_name: Interactive-Bot-Tester
+          - os: macos-latest
+            name: macOS
+            artifact_name: Interactive-Bot-Tester.app
+          - os: windows-latest
+            name: Windows
+            artifact_name: Interactive-Bot-Tester.exe
+    
+    runs-on: ${{ matrix.os }}
     
     steps:
       - name: Checkout code
@@ -33,14 +47,48 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller>=6.19.0
       
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+      
       - name: Build executable
         run: |
           python -m PyInstaller build_gui.spec
       
       - name: List generated files
+        shell: bash
         run: |
-          dir dist\
-          Get-ChildItem -Recurse dist\ -Name
+          find dist -type f -name "*.exe" -o -name "Interactive*" | head -20
+      
+      - name: Find and get artifact path (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ -d "dist/Interactive Bot Tester" ]; then
+            ARTIFACT_PATH="dist/Interactive Bot Tester"
+          elif [ -d "dist/Interactive Bot Tester.app" ]; then
+            ARTIFACT_PATH="dist/Interactive Bot Tester.app"
+          else
+            find dist -maxdepth 2 -type d -name "Interactive*" | head -1 > /tmp/path.txt
+            ARTIFACT_PATH=$(cat /tmp/path.txt)
+          fi
+          echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> $GITHUB_ENV
+          echo "Found artifact at: $ARTIFACT_PATH"
+      
+      - name: Find and get artifact path (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exePath = Get-ChildItem -Path dist\ -Recurse -Filter "*.exe" | Select-Object -First 1
+          if ($exePath) {
+            echo "ARTIFACT_PATH=$($exePath.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Found executable: $($exePath.FullName)"
+          } else {
+            Write-Host "No executable found!"
+            exit 1
+          }
       
       - name: Create Release
         uses: actions/create-release@v1
@@ -48,34 +96,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: build-${{ github.run_number }}
-          release_name: Build #${{ github.run_number }}
+          tag_name: build-${{ matrix.name }}-${{ github.run_number }}
+          release_name: Build #${{ github.run_number }} - ${{ matrix.name }}
           body: |
-            Automated build from commit ${{ github.sha }}
+            Automated build for **${{ matrix.name }}** from commit ${{ github.sha }}
             
             **Changes**: ${{ github.event.head_commit.message }}
           draft: false
           prerelease: false
       
-      - name: Find and upload executable
-        shell: pwsh
-        run: |
-          $exePath = Get-ChildItem -Path dist\ -Recurse -Filter "*.exe" | Select-Object -First 1
-          if ($exePath) {
-            echo "EXE_PATH=$($exePath.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Host "Found executable: $($exePath.FullName)"
-          } else {
-            Write-Host "No executable found!"
-            exit 1
-          }
-      
-      - name: Upload executable to Release
+      - name: Upload to Release (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ env.EXE_PATH }}
-          asset_name: Interactive-Bot-Tester.exe
+          asset_path: ${{ env.ARTIFACT_PATH }}
+          asset_name: Interactive-Bot-Tester-Windows.exe
           asset_content_type: application/octet-stream
+      
+      - name: Compress and upload to Release (macOS .app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd dist
+          zip -r "Interactive-Bot-Tester-macOS.zip" "Interactive Bot Tester.app"
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @"Interactive-Bot-Tester-macOS.zip" \
+            "${{ steps.create_release.outputs.upload_url }}?name=Interactive-Bot-Tester-macOS.zip"
+      
+      - name: Compress and upload to Release (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cd dist
+          # Create tarball of the executable
+          if [ -d "Interactive Bot Tester" ]; then
+            tar -czf "Interactive-Bot-Tester-Linux.tar.gz" "Interactive Bot Tester"
+          else
+            # Fallback: find any executable
+            EXEC=$(find . -maxdepth 2 -type f -executable -name "*Interactive*" | head -1)
+            if [ -n "$EXEC" ]; then
+              tar -czf "Interactive-Bot-Tester-Linux.tar.gz" "$EXEC"
+            fi
+          fi
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @"Interactive-Bot-Tester-Linux.tar.gz" \
+            "${{ steps.create_release.outputs.upload_url }}?name=Interactive-Bot-Tester-Linux.tar.gz"
 
