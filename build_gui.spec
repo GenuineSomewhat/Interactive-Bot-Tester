@@ -9,7 +9,7 @@ block_cipher = None
 ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
 
 a = Analysis(
-    ['src\\interactive_gui.py'],
+    ['src/interactive_gui.py'],
     pathex=[],
     binaries=ctk_binaries,
     datas=ctk_datas + [('icon.ico', '.')],  # Include icon.ico in root of executable
