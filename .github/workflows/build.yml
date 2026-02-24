@@ -36,8 +36,8 @@ jobs:
       
       - name: List generated files
         run: |
-          dir packages\
-          dir packages\Interactive*
+          dir dist\
+          dir dist\Interactive*
       
       - name: Create Release
         uses: actions/create-release@v1
@@ -60,7 +60,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packages/Interactive Bot Tester/Interactive Bot Tester.exe
+          asset_path: dist/Interactive Bot Tester/Interactive Bot Tester.exe
           asset_name: Interactive-Bot-Tester.exe
           asset_content_type: application/octet-stream
 
