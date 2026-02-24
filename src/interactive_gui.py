@@ -3,11 +3,16 @@ GUI version of the interactive bot tester with image support.
 """
 
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, filedialog, ttk
+from tkinter import scrolledtext, messagebox, filedialog
+import customtkinter as ctk
 from PIL import Image, ImageTk
 import os
 import sys
 from pathlib import Path
+
+# Set appearance mode and color theme
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
 
 # Add parent to path for importing interactive_test
 sys.path.insert(0, str(Path(__file__).parent))
@@ -25,161 +30,159 @@ class BotTesterGUI:
         self.selected_image_path = None
         self.selected_image_tk = None
         
-        # Configure style
-        self.root.configure(bg="#f0f0f0")
-        
         # Initialize GUI
         self.setup_ui()
         
     def setup_ui(self):
         """Create the GUI layout."""
         # Main container
-        main_frame = tk.Frame(self.root, bg="#f0f0f0")
+        main_frame = ctk.CTkFrame(self.root, fg_color="#f5f7f9")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Title bar with bot info
-        title_frame = tk.Frame(main_frame, bg="#2c3e50", highlightthickness=0)
+        title_frame = ctk.CTkFrame(main_frame, fg_color="#4B7EC9", corner_radius=8)
         title_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.title_label = tk.Label(
+        self.title_label = ctk.CTkLabel(
             title_frame,
             text="Bot Interactive Tester",
-            bg="#2c3e50",
-            fg="white",
-            font=("Arial", 14, "bold"),
-            padx=10,
-            pady=10
+            text_color="white",
+            font=("Arial", 16, "bold"),
+            fg_color="#4B7EC9"
         )
-        self.title_label.pack(side=tk.LEFT)
+        self.title_label.pack(side=tk.LEFT, padx=10, pady=10)
         
-        self.bot_info_label = tk.Label(
+        self.bot_info_label = ctk.CTkLabel(
             title_frame,
             text="No bot loaded",
-            bg="#2c3e50",
-            fg="#ecf0f1",
+            text_color="#ffffff",
             font=("Arial", 10),
-            padx=10,
-            pady=10
+            fg_color="#4B7EC9"
         )
         self.bot_info_label.pack(side=tk.LEFT, padx=(20, 0))
         
         # Load bot button
-        load_bot_btn = tk.Button(
+        load_bot_btn = ctk.CTkButton(
             title_frame,
             text="Load Bot",
             command=self.load_bot,
-            bg="#3498db",
-            fg="white",
-            activebackground="#2980b9",
-            padx=15,
-            pady=5,
-            font=("Arial", 10, "bold")
+            fg_color="#ffffff",
+            text_color="#4B7EC9",
+            hover_color="#e8eef7",
+            font=("Arial", 10, "bold"),
+            corner_radius=6
         )
         load_bot_btn.pack(side=tk.RIGHT, padx=10, pady=10)
         
         # User selector frame
-        user_frame = tk.Frame(main_frame, bg="white", relief=tk.SUNKEN, bd=1)
+        user_frame = ctk.CTkFrame(main_frame, fg_color="#f5f7f9", corner_radius=8)
         user_frame.pack(fill=tk.X, pady=(0, 10))
         
-        user_label = tk.Label(user_frame, text="User:", bg="white", font=("Arial", 10))
+        user_label = ctk.CTkLabel(user_frame, text="User:", text_color="#2D3436", font=("Arial", 10, "bold"), fg_color="#f5f7f9")
         user_label.pack(side=tk.LEFT, padx=10, pady=8)
         
         self.user_var = tk.StringVar(value="TestUser")
-        self.user_combo = ttk.Combobox(
+        self.user_combo = ctk.CTkComboBox(
             user_frame,
-            textvariable=self.user_var,
+            variable=self.user_var,
             values=["TestUser"],
             state="readonly",
-            width=20,
-            font=("Arial", 10)
+            font=("Arial", 10),
+            corner_radius=6
         )
         self.user_combo.pack(side=tk.LEFT, padx=5, pady=8)
         self.user_combo.bind("<<ComboboxSelected>>", self.on_user_change)
         
         # Quick action buttons
-        ttk.Button(user_frame, text="Reset State", command=self.reset_state).pack(side=tk.LEFT, padx=5, pady=8)
-        ttk.Button(user_frame, text="Show State", command=self.show_state).pack(side=tk.LEFT, padx=5, pady=8)
+        ctk.CTkButton(user_frame, text="Reset State", command=self.reset_state, corner_radius=6).pack(side=tk.LEFT, padx=5, pady=8)
+        ctk.CTkButton(user_frame, text="Show State", command=self.show_state, corner_radius=6).pack(side=tk.LEFT, padx=5, pady=8)
         
         # Main content area (chat + image)
-        content_frame = tk.Frame(main_frame, bg="white", relief=tk.SUNKEN, bd=1)
+        content_frame = ctk.CTkFrame(main_frame, fg_color="#f5f7f9", corner_radius=8)
         content_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
         # Left side - chat display
-        left_frame = tk.Frame(content_frame, bg="white")
+        left_frame = ctk.CTkFrame(content_frame, fg_color="#f5f7f9", corner_radius=0)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        chat_label = tk.Label(left_frame, text="Bot Responses:", bg="white", font=("Arial", 11, "bold"))
+        chat_label = ctk.CTkLabel(left_frame, text="Bot Responses:", text_color="#2D3436", font=("Arial", 12, "bold"), fg_color="#f5f7f9")
         chat_label.pack(anchor=tk.W, pady=(0, 5))
         
-        # Chat display area
+        # Chat display area (using tk.Text for better compatibility)
         self.chat_display = scrolledtext.ScrolledText(
             left_frame,
             height=15,
             width=50,
             font=("Courier", 10),
-            bg="#ecf0f1",
-            fg="#2c3e50",
+            bg="#eff2f7",
+            fg="#2D3436",
             wrap=tk.WORD,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
         
         # Right side - image preview
-        right_frame = tk.Frame(content_frame, bg="white", width=250)
+        right_frame = ctk.CTkFrame(content_frame, fg_color="#f5f7f9", corner_radius=0)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=10, pady=10)
+        right_frame.configure(width=250)
         right_frame.pack_propagate(False)
         
-        image_label = tk.Label(right_frame, text="Image Preview:", bg="white", font=("Arial", 11, "bold"))
+        image_label = ctk.CTkLabel(right_frame, text="Image Preview:", text_color="#2D3436", font=("Arial", 12, "bold"), fg_color="#f5f7f9")
         image_label.pack(anchor=tk.W, pady=(0, 5))
         
         # Image frame
-        self.image_frame = tk.Frame(right_frame, bg="#ecf0f1", relief=tk.SUNKEN, bd=1)
+        self.image_frame = ctk.CTkFrame(right_frame, fg_color="#eff2f7", corner_radius=8, border_width=2, border_color="#d0d8e0")
         self.image_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        self.image_label_display = tk.Label(
+        self.image_label_display = ctk.CTkLabel(
             self.image_frame,
             text="No image selected",
-            bg="#ecf0f1",
-            fg="#7f8c8d",
+            text_color="#a8b3c1",
             font=("Arial", 10),
-            justify=tk.CENTER
+            fg_color="#eff2f7"
         )
         self.image_label_display.pack(expand=True)
         
         # Image filename
-        self.image_filename_label = tk.Label(
+        self.image_filename_label = ctk.CTkLabel(
             right_frame,
             text="",
-            bg="white",
-            fg="#7f8c8d",
+            text_color="#8a94a6",
             font=("Arial", 9),
-            wraplength=200,
-            justify=tk.LEFT
+            fg_color="#f5f7f9"
         )
         self.image_filename_label.pack(anchor=tk.W, pady=(0, 5))
         
         # Image selection buttons
-        btn_frame = tk.Frame(right_frame, bg="white")
+        btn_frame = ctk.CTkFrame(right_frame, fg_color="#f5f7f9", corner_radius=0)
         btn_frame.pack(fill=tk.X, pady=(0, 10))
         
-        ttk.Button(btn_frame, text="Pick Image", command=self.pick_image).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="Clear Image", command=self.clear_image).pack(fill=tk.X, pady=2)
+        ctk.CTkButton(btn_frame, text="Pick Image", command=self.pick_image, corner_radius=6).pack(fill=tk.X, pady=2)
+        ctk.CTkButton(btn_frame, text="Clear Image", command=self.clear_image, corner_radius=6).pack(fill=tk.X, pady=2)
         
         # Input area
-        input_frame = tk.Frame(main_frame, bg="white", relief=tk.SUNKEN, bd=1)
+        input_frame = ctk.CTkFrame(main_frame, fg_color="#f5f7f9", corner_radius=8)
         input_frame.pack(fill=tk.X, pady=(0, 10))
         
-        input_label = tk.Label(input_frame, text="Message:", bg="white", font=("Arial", 10, "bold"))
+        input_label = ctk.CTkLabel(input_frame, text="Message:", text_color="#2D3436", font=("Arial", 10, "bold"), fg_color="#f5f7f9")
         input_label.pack(anchor=tk.W, padx=10, pady=(5, 0))
         
-        # Message input
+        # Message input (using tk.Text for better control)
         self.message_input = tk.Text(
             input_frame,
             height=4,
             font=("Arial", 10),
-            bg="#fafafa",
-            fg="#2c3e50",
-            wrap=tk.WORD
+            bg="#fafbfd",
+            fg="#2D3436",
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=1,
+            insertbackground="#4B7EC9",
+            highlightthickness=1,
+            highlightbackground="#d0d8e0"
         )
         self.message_input.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.message_input.bind("<Control-Return>", lambda e: self.send_message())
@@ -192,7 +195,7 @@ class BotTesterGUI:
         self.message_input.bind("<Button-3>", self.show_context_menu)  # Right-click context menu
         
         # Create context menu for text widget
-        self.context_menu = tk.Menu(self.message_input, tearoff=0)
+        self.context_menu = tk.Menu(self.message_input, tearoff=0, bg="#f5f7f9", fg="#2D3436", activebackground="#4B7EC9", activeforeground="#ffffff")
         self.context_menu.add_command(label="Cut", command=self.cut_text)
         self.context_menu.add_command(label="Copy", command=self.copy_text)
         self.context_menu.add_command(label="Paste", command=self.paste_text)
@@ -200,34 +203,29 @@ class BotTesterGUI:
         self.context_menu.add_command(label="Clear", command=self.clear_input)
         
         # Send button
-        button_frame = tk.Frame(input_frame, bg="white")
+        button_frame = ctk.CTkFrame(input_frame, fg_color="#f5f7f9", corner_radius=0)
         button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
         
-        send_btn = tk.Button(
+        send_btn = ctk.CTkButton(
             button_frame,
             text="Send Message (Ctrl+Enter)",
             command=self.send_message,
-            bg="#27ae60",
-            fg="white",
-            activebackground="#229954",
-            padx=20,
-            pady=10,
+            fg_color="#4B7EC9",
+            text_color="white",
+            hover_color="#3a5fa8",
             font=("Arial", 11, "bold"),
-            cursor="hand2"
+            corner_radius=6
         )
         send_btn.pack(side=tk.RIGHT, padx=(5, 0))
         
         # Status bar
-        self.status_label = tk.Label(
+        self.status_label = ctk.CTkLabel(
             main_frame,
             text="Ready. Load a bot to start testing.",
-            bg="#ecf0f1",
-            fg="#7f8c8d",
+            text_color="#8a94a6",
             font=("Arial", 9),
-            anchor=tk.W,
-            relief=tk.SUNKEN,
-            padx=5,
-            pady=5
+            fg_color="#eff2f7",
+            corner_radius=6
         )
         self.status_label.pack(fill=tk.X)
         
@@ -236,13 +234,8 @@ class BotTesterGUI:
     
     def auto_load_bot(self):
         """Try to auto-load a bot on startup."""
-        try:
-            # Try to load from startup menu
-            bot_path = get_bot_path_startup()
-            if bot_path:
-                self.load_bot_from_path(bot_path)
-        except Exception:
-            pass
+        # Disabled for GUI - user will click "Load Bot" button instead
+        pass
     
     def load_bot(self):
         """Show bot selection dialog."""
@@ -279,19 +272,21 @@ class BotTesterGUI:
         try:
             self.tester = InteractiveTester(bot_module_path=bot_path)
             
-            # Update title and info
-            bot_name = Path(bot_path).stem
-            self.title_label.config(text=f"Bot: {bot_name}")
-            self.bot_info_label.config(text=f"Route: {self.tester.webhook_route} | State: {len(self.tester.bot_state)} vars")
+            # Update title and info using tester's attributes
+            bot_name = self.tester.bot_name
+            bot_type = (self.tester.bot_type or 'unknown').capitalize()
+            self.title_label.configure(text=f"Bot: {bot_name} ({bot_type})")
+            self.bot_info_label.configure(text=f"Route: {self.tester.webhook_route} | State: {len(self.tester.bot_state)} vars")
             
             # Update user combo with available dummies
-            self.user_combo.config(values=list(self.tester.dummies.keys()))
+            self.user_combo.configure(values=list(self.tester.dummies.keys()))
             self.user_combo.set("TestUser")
             
             # Clear chat and reset
             self.chat_display.config(state=tk.NORMAL)
             self.chat_display.delete(1.0, tk.END)
-            self.chat_display.insert(tk.END, f"✓ Loaded: {bot_name}\n")
+            bot_type_label = "Flask" if self.tester.bot_type == 'flask' else "Polling"
+            self.chat_display.insert(tk.END, f"✓ Loaded: {bot_name} ({bot_type_label} bot)\n")
             self.chat_display.insert(tk.END, f"✓ Route: {self.tester.webhook_route}\n")
             self.chat_display.insert(tk.END, f"✓ State vars: {', '.join(self.tester.bot_state.keys())}\n\n")
             self.chat_display.config(state=tk.DISABLED)
@@ -331,8 +326,8 @@ class BotTesterGUI:
             self.selected_image_tk = ImageTk.PhotoImage(img)
             
             # Update labels
-            self.image_label_display.config(image=self.selected_image_tk, text="")
-            self.image_filename_label.config(text=Path(image_path).name)
+            self.image_label_display.configure(image=self.selected_image_tk, text="")
+            self.image_filename_label.configure(text=Path(image_path).name)
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load image: {e}")
@@ -342,8 +337,8 @@ class BotTesterGUI:
         """Clear the selected image."""
         self.selected_image_path = None
         self.selected_image_tk = None
-        self.image_label_display.config(image="", text="No image selected")
-        self.image_filename_label.config(text="")
+        self.image_label_display.configure(image="", text="No image selected")
+        self.image_filename_label.configure(text="")
         self.update_status("Image cleared")
     
     def on_user_change(self, event=None):
@@ -466,7 +461,7 @@ class BotTesterGUI:
     
     def update_status(self, message):
         """Update status bar."""
-        self.status_label.config(text=message)
+        self.status_label.configure(text=message)
     
     def show_context_menu(self, event):
         """Show context menu on right-click."""
@@ -502,7 +497,7 @@ class BotTesterGUI:
 
 
 def main():
-    root = tk.Tk()
+    root = ctk.CTk()
     app = BotTesterGUI(root)
     root.mainloop()
 

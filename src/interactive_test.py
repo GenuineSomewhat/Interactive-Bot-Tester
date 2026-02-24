@@ -20,11 +20,12 @@ except Exception:
 
 def discover_bots(search_dir=None):
     """
-    Scan directory for potential Flask bot files.
+    Scan directory for potential bot files (Flask-based or polling-based).
     Excludes this script itself and test files.
     
     Returns:
-        List of tuples: [(file_path, file_name), ...]
+        List of tuples: [(file_path, file_name, bot_type), ...]
+        where bot_type is 'flask' or 'polling'
     """
     if search_dir is None:
         search_dir = os.getcwd()
@@ -50,10 +51,34 @@ def discover_bots(search_dir=None):
         # Quick heuristic check without loading
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read(2000)  # Read first 2KB
-                # Look for Flask app indicators
-                if 'Flask' in content and ('app =' in content or '@app.route' in content or '@app.post' in content):
-                    bots.append((filepath, filename))
+                content = f.read()  # Read entire file for better detection
+                
+                # Strong polling indicators
+                has_watch_for_messages = 'watch_for_messages' in content or ('while True:' in content and 'groupme_api' in content)
+                has_groupme_api = content.count('groupme_api(') > 1
+                
+                # Strong Flask indicators (actual Flask app instantiation)
+                has_flask_app = 'app = Flask(' in content or 'app=Flask(' in content
+                has_flask_routes = '@app.route(' in content or '@app.post(' in content
+                
+                # Score-based detection
+                polling_score = 0
+                flask_score = 0
+                
+                if has_watch_for_messages:
+                    polling_score += 10
+                if has_groupme_api:
+                    polling_score += 5
+                
+                if has_flask_app:
+                    flask_score += 10
+                if has_flask_routes:
+                    flask_score += 5
+                
+                # Determine bot type
+                if polling_score > 0 or flask_score > 0:
+                    bot_type = 'polling' if polling_score > flask_score else 'flask'
+                    bots.append((filepath, filename, bot_type))
         except Exception:
             continue
     
@@ -84,11 +109,13 @@ def get_bot_path_startup():
             # Auto-discovery
             bots = discover_bots()
             if len(bots) == 0:
-                print("\n[ERROR] No Flask bot files found in current directory")
+                print("\n[ERROR] No bot files found in current directory")
                 print("Try option 2 to manually enter a bot path.\n")
                 continue
             elif len(bots) == 1:
-                print(f"\n[AUTO] Found bot: {bots[0][1]}")
+                bot_type = bots[0][2]
+                type_label = "Flask" if bot_type == 'flask' else "Polling"
+                print(f"\n[AUTO] Found {type_label} bot: {bots[0][1]}")
                 return bots[0][0]
             else:
                 # Show menu for multiple bots
@@ -116,9 +143,10 @@ def select_bot_interactive():
     print("AVAILABLE BOTS FOUND")
     print("="*70)
     
-    for i, (path, filename) in enumerate(bots, 1):
+    for i, (path, filename, bot_type) in enumerate(bots, 1):
         size = os.path.getsize(path)
-        print(f"  {i}. {filename:30} ({size:,} bytes)")
+        type_label = "[Flask]" if bot_type == 'flask' else "[Polling]"
+        print(f"  {i}. {filename:30} {type_label:12} ({size:,} bytes)")
     
     while True:
         try:
@@ -169,13 +197,15 @@ def get_custom_bot_path():
             potential_bots = discover_bots(bot_path)
             
             if len(potential_bots) == 0:
-                print(f"[ERROR] No Flask bots found in {bot_path}")
-                print("Looking for .py files with Flask patterns...")
+                print(f"[ERROR] No bots found in {bot_path}")
+                print("Looking for .py files with Flask or polling patterns...")
                 print("Try entering the full path to a bot file instead.\n")
                 continue
             elif len(potential_bots) == 1:
                 bot_file = potential_bots[0][0]
-                print(f"[AUTO] Found bot: {potential_bots[0][1]}")
+                bot_type = potential_bots[0][2]
+                type_label = "Flask" if bot_type == 'flask' else "Polling"
+                print(f"[AUTO] Found {type_label} bot: {potential_bots[0][1]}")
                 return bot_file
             else:
                 # Multiple bots in folder - show menu
@@ -184,9 +214,10 @@ def get_custom_bot_path():
                 print("BOTS IN DIRECTORY")
                 print("="*70)
                 
-                for i, (path, filename) in enumerate(potential_bots, 1):
+                for i, (path, filename, bot_type) in enumerate(potential_bots, 1):
                     size = os.path.getsize(path)
-                    print(f"  {i}. {filename:30} ({size:,} bytes)")
+                    type_label = "[Flask]" if bot_type == 'flask' else "[Polling]"
+                    print(f"  {i}. {filename:30} {type_label:12} ({size:,} bytes)")
                 
                 while True:
                     try:
@@ -236,10 +267,15 @@ def load_bot_module(bot_module_path):
     # Get the directory containing the bot file
     bot_dir = os.path.dirname(bot_module_path)
     
-    # Save current working directory and change to bot directory
+    # Save current working directory and sys.path
     original_cwd = os.getcwd()
+    original_sys_path = sys.path.copy()
     try:
         os.chdir(bot_dir)
+        
+        # Add bot directory to sys.path so it can import its own modules (like config.py)
+        if bot_dir not in sys.path:
+            sys.path.insert(0, bot_dir)
         
         # Clear any previously cached module with the same name
         module_name = Path(bot_module_path).stem
@@ -291,8 +327,9 @@ def load_bot_module(bot_module_path):
         
         return bot_module, flask_app, bot_state
     finally:
-        # Always restore the original working directory
+        # Always restore the original working directory and sys.path
         os.chdir(original_cwd)
+        sys.path = original_sys_path
 
 
 class InteractiveTester:
@@ -311,10 +348,12 @@ class InteractiveTester:
                 sys.exit(0)
         
         self.bot_module_path = bot_module_path
+        self.bot_name = os.path.basename(bot_module_path).replace('.py', '')
         self.bot_module = None
         self.app = None
         self.bot_state = {}
         self.webhook_route = "/"  # Will be updated by _load_bot
+        self.bot_type = None  # 'flask' or 'polling'
         self._load_bot()
         
         self.sent_messages = []
@@ -332,22 +371,181 @@ class InteractiveTester:
     def _load_bot(self):
         """Load the bot module."""
         try:
-            self.bot_module, self.app, self.bot_state = load_bot_module(self.bot_module_path)
-            print(f"[INFO] Loaded bot from: {self.bot_module_path}")
-            if self.bot_state:
-                print(f"[INFO] Found state attributes: {', '.join(self.bot_state.keys())}")
-
-            if hasattr(self.bot_module, "requests"):
-                self._original_requests_get = self.bot_module.requests.get
+            # Auto-detect bot type by analyzing the code
+            with open(self.bot_module_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()  # Read entire file for better detection
+                
+                # Strong polling indicators
+                has_watch_for_messages = 'watch_for_messages' in content or 'while True:' in content and 'groupme_api' in content
+                has_groupme_api = content.count('groupme_api(') > 1  # Multiple API calls
+                has_send_message_func = 'def send_message(' in content or 'send_message(' in content
+                
+                # Strong Flask indicators (actual Flask app instantiation, not just imports)
+                has_flask_app = 'app = Flask(' in content or 'app=Flask(' in content
+                has_flask_routes = '@app.route(' in content or '@app.post(' in content
+                
+                # Score-based detection
+                polling_score = 0
+                flask_score = 0
+                
+                if has_watch_for_messages:
+                    polling_score += 10  # Very strong indicator
+                if has_groupme_api:
+                    polling_score += 5
+                if has_send_message_func:
+                    polling_score += 3
+                
+                if has_flask_app:
+                    flask_score += 10  # Very strong indicator
+                if has_flask_routes:
+                    flask_score += 5
+                
+                # Determine bot type based on scores
+                is_polling = polling_score > flask_score
             
-            # Auto-detect the webhook route
-            self._detect_webhook_route()
+            if is_polling:
+                # Polling bot
+                self.bot_type = 'polling'
+                self.bot_module = self._load_polling_bot()
+                print("\n" + "="*70)
+                print(f"BOT LOADED: {self.bot_name}")
+                print("="*70)
+                print(f"[INFO] Type: Polling Bot")
+                print(f"[INFO] Path: {self.bot_module_path}")
+                # For polling bots, collect state variables
+                self._collect_bot_state_polling()
+                print("="*70 + "\n")
+            else:
+                # Flask bot
+                self.bot_type = 'flask'
+                self.bot_module, self.app, self.bot_state = load_bot_module(self.bot_module_path)
+                print("\n" + "="*70)
+                print(f"BOT LOADED: {self.bot_name}")
+                print("="*70)
+                print(f"[INFO] Type: Flask Bot")
+                print(f"[INFO] Path: {self.bot_module_path}")
+                if self.bot_state:
+                    print(f"[INFO] Found state attributes: {', '.join(self.bot_state.keys())}")
+                print("="*70 + "\n")
+
+                if hasattr(self.bot_module, "requests"):
+                    self._original_requests_get = self.bot_module.requests.get
+                
+                # Auto-detect the webhook route
+                self._detect_webhook_route()
         except Exception as e:
             print(f"[ERROR] Failed to load bot: {e}")
+            import traceback
+            traceback.print_exc()
             raise
+    
+    def _load_polling_bot(self):
+        """Load a polling bot module."""
+        bot_module_path = self.bot_module_path
+        
+        # Convert to absolute path
+        if not os.path.isabs(bot_module_path):
+            bot_module_path = os.path.abspath(bot_module_path)
+        
+        # Get the directory containing the bot file
+        bot_dir = os.path.dirname(bot_module_path)
+        
+        # Save current working directory and sys.path
+        original_cwd = os.getcwd()
+        original_sys_path = sys.path.copy()
+        try:
+            os.chdir(bot_dir)
+            
+            # Add bot directory to sys.path so it can import its own modules (like config.py)
+            if bot_dir not in sys.path:
+                sys.path.insert(0, bot_dir)
+            
+            # Create mock config module if config.py exists but might need defaults
+            config_path = os.path.join(bot_dir, "config.py")
+            if os.path.exists(config_path):
+                # Load config module and inject test values if needed
+                try:
+                    import config
+                    # Inject test values for any missing attributes
+                    if not hasattr(config, 'TOKEN'):
+                        config.TOKEN = "test_token_12345"
+                    if not hasattr(config, 'GROUP_ID'):
+                        config.GROUP_ID = "test_group_123"
+                    if not hasattr(config, 'MAIN_GROUP_ID'):
+                        config.MAIN_GROUP_ID = "test_group_123"
+                    if not hasattr(config, 'YOUR_USER_ID'):
+                        config.YOUR_USER_ID = "test_user_123"
+                    if not hasattr(config, 'BASE_URL'):
+                        config.BASE_URL = "https://api.groupme.com/v3"
+                except:
+                    pass
+            
+            # Mock environment variables if not already set
+            os.environ.setdefault("GROUPME_USER_ACCESS_TOKEN", "test_token_12345")
+            os.environ.setdefault("GROUPME_GROUP_ID", "test_group_123")
+            os.environ.setdefault("GROUPME_BOT_ID", "test_bot_123")
+            os.environ.setdefault("GROUP_ID", "test_group_123")
+            os.environ.setdefault("BOT_ID", "test_bot_123")
+            os.environ.setdefault("ACCESS_TOKEN", "test_token_12345")
+            
+            # Set flag to prevent bot from starting its main loop
+            os.environ["TESTING_MODE"] = "1"
+            
+            # Clear any previously cached module with the same name
+            module_name = Path(bot_module_path).stem
+            for mod_key in list(sys.modules.keys()):
+                if module_name in mod_key:
+                    del sys.modules[mod_key]
+            
+            # Load the module
+            spec = importlib.util.spec_from_file_location(module_name, bot_module_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            
+            # Mock requests module to prevent actual API calls
+            mock_response = MagicMock()
+            mock_response.json.return_value = {"response": {"messages": []}}
+            
+            with ExitStack() as stack:
+                # Suppress print statements during load
+                stack.enter_context(patch('builtins.print'))
+                # Mock requests to prevent API calls during init
+                try:
+                    import requests as req_mod
+                    stack.enter_context(patch.object(req_mod, 'get', return_value=mock_response))
+                    stack.enter_context(patch.object(req_mod, 'post', return_value=mock_response))
+                except:
+                    pass
+                
+                # Execute the module
+                spec.loader.exec_module(module)
+            
+            return module
+        finally:
+            os.chdir(original_cwd)
+            sys.path = original_sys_path
+    
+    def _collect_bot_state_polling(self):
+        """Collect mutable state from polling bot."""
+        # Common state variable names in polling bots
+        state_names = ['MUTED', 'VIOLATION_COUNTS', 'settings', 'active_games', 
+                       'timeouts', 'leaderboard', 'triggers']
+        
+        for name in state_names:
+            if hasattr(self.bot_module, name):
+                attr = getattr(self.bot_module, name)
+                if isinstance(attr, (dict, list, set)):
+                    self.bot_state[name] = attr
+        
+        if self.bot_state:
+            print(f"[INFO] Found state attributes: {', '.join(self.bot_state.keys())}")
     
     def _detect_webhook_route(self):
         """Detect the webhook route for this bot."""
+        if not self.app:
+            self.webhook_route = "(polling bot - no webhook)"
+            return
+            
         # Default to root
         webhook_route = "/"
         
@@ -499,6 +697,177 @@ class InteractiveTester:
         self.deleted_messages = []
         self.banned_members = []
 
+        if self.bot_type == 'polling':
+            return self._test_message_polling(text, user_name, attachments, image_path)
+        else:
+            return self._test_message_flask(text, user_name, attachments, image_path)
+    
+    def _test_message_polling(self, text, user_name=None, attachments=None, image_path=None):
+        """Test a message for a polling bot."""
+        text = self._rewrite_dummy_targets(text)
+        
+        def capture_message(msg_text, **kwargs):
+            """Capture messages sent by the bot, ignoring extra kwargs like group_id, reply_to"""
+            print(f"[DEBUG] Bot sent message: {msg_text}")
+            self.sent_messages.append(msg_text)
+        
+        if user_name:
+            user_id = self.dummies.get(user_name, "123")
+        else:
+            user_name, user_id = self._get_active_user()
+        
+        message_id = f"test_msg_{self._next_message_id}"
+        self._next_message_id += 1
+
+        if attachments is None:
+            attachments = []
+        if image_path:
+            attachments = list(attachments) + [
+                {
+                    "type": "image",
+                    "url": f"file://{image_path}"
+                }
+            ]
+
+        # Create GroupMe-style message object
+        import time
+        msg = {
+            "id": message_id,
+            "user_id": user_id,
+            "sender_id": user_id,
+            "sender_type": "user",
+            "name": user_name,
+            "text": text,
+            "created_at": int(time.time()),
+            "attachments": attachments,
+            "system": False
+        }
+        
+        # Patch send_message everywhere (main module and all command modules)
+        with ExitStack() as stack:
+            # Patch in main module
+            if hasattr(self.bot_module, 'send_message'):
+                print(f"[DEBUG] Patching bot_module.send_message")
+                stack.enter_context(patch.object(self.bot_module, 'send_message', capture_message))
+            
+            # Patch in all imported command/game modules that might have imported send_message
+            for attr_name in dir(self.bot_module):
+                attr = getattr(self.bot_module, attr_name)
+                # Check if it's a module (command modules, game modules)
+                if hasattr(attr, '__name__') and hasattr(attr, 'send_message'):
+                    print(f"[DEBUG] Patching {attr.__name__}.send_message")
+                    stack.enter_context(patch.object(attr, 'send_message', capture_message))
+            
+            # Also try patching in sys.modules for any Commands.* or Games.* modules
+            for mod_name, mod in list(sys.modules.items()):
+                if ('Commands.' in mod_name or 'Games.' in mod_name or 'Meme.' in mod_name) and hasattr(mod, 'send_message'):
+                    print(f"[DEBUG] Patching {mod_name}.send_message")
+                    stack.enter_context(patch.object(mod, 'send_message', capture_message))
+            
+            if hasattr(self.bot_module, 'delete_message'):
+                stack.enter_context(patch.object(self.bot_module, 'delete_message', self._capture_delete))
+            
+            # Process message through bot's handlers
+            self._process_polling_message(msg)
+        
+        print(f"[DEBUG] Captured {len(self.sent_messages)} messages")
+        return self.sent_messages
+    
+    def _process_polling_message(self, msg):
+        """Process a message through polling bot's handlers."""
+        text = (msg.get("text") or "").strip().lower()
+        raw_text = msg.get("text") or ""
+        
+        print(f"[DEBUG] Processing message: '{raw_text}'")
+        print(f"[DEBUG] Bot module has these message handlers:")
+        handlers = [attr for attr in dir(self.bot_module) if 'handle' in attr.lower() or attr in ['send_message', 'list_memes']]
+        print(f"[DEBUG]   {', '.join(handlers)}")
+        
+        # Mimic the actual bot's message processing flow
+        # Most handlers are called for EVERY message (they filter internally)
+        
+        # MEME COMMANDS (bot filters these)
+        if hasattr(self.bot_module, 'handle_meme_command'):
+            if text.startswith("!meme"):
+                print(f"[DEBUG] Calling handle_meme_command")
+                self.bot_module.handle_meme_command(msg)
+        
+        if hasattr(self.bot_module, 'list_memes'):
+            if text == "!list":
+                print(f"[DEBUG] Calling list_memes")
+                memes = self.bot_module.list_memes()
+                if hasattr(self.bot_module, 'send_message'):
+                    if memes:
+                        self.bot_module.send_message("Available meme templates:\\n" + "\\n".join(memes))
+                    else:
+                        self.bot_module.send_message("No meme templates found.")
+        
+        # GAME HANDLERS (called for every message, filter internally)
+        if hasattr(self.bot_module, 'handle_tictactoe'):
+            print(f"[DEBUG] Calling handle_tictactoe")
+            self.bot_module.handle_tictactoe(msg)
+        
+        if hasattr(self.bot_module, 'handle_connect_four'):
+            print(f"[DEBUG] Calling handle_connect_four")
+            self.bot_module.handle_connect_four(msg)
+        
+        if hasattr(self.bot_module, 'handle_connectfour'):
+            print(f"[DEBUG] Calling handle_connectfour")
+            self.bot_module.handle_connectfour(msg)
+        
+        if hasattr(self.bot_module, 'handle_2048'):
+            print(f"[DEBUG] Calling handle_2048")
+            self.bot_module.handle_2048(msg)
+        
+        # 8BALL (called for every message, filters internally)
+        if hasattr(self.bot_module, 'handle_eightball'):
+            print(f"[DEBUG] Calling handle_eightball")
+            self.bot_module.handle_eightball(msg)
+        
+        # HELP (called for every message, filters internally)
+        if hasattr(self.bot_module, 'handle_help_command'):
+            print(f"[DEBUG] Calling handle_help_command")
+            self.bot_module.handle_help_command(msg)
+        
+        if hasattr(self.bot_module, 'handle_listtimeouts'):
+            print(f"[DEBUG] Calling handle_listtimeouts")
+            self.bot_module.handle_listtimeouts(msg)
+        
+        # RESTART
+        if hasattr(self.bot_module, 'handle_restart'):
+            print(f"[DEBUG] Calling handle_restart")
+            self.bot_module.handle_restart(msg)
+        
+        # TRIGGERS (called for every message, filter internally)
+        if hasattr(self.bot_module, 'handle_triggers'):
+            print(f"[DEBUG] Calling handle_triggers")
+            self.bot_module.handle_triggers(msg)
+        
+        if hasattr(self.bot_module, 'handle_addtrigger'):
+            print(f"[DEBUG] Calling handle_addtrigger")
+            self.bot_module.handle_addtrigger(msg)
+        
+        if hasattr(self.bot_module, 'handle_listtriggers'):
+            print(f"[DEBUG] Calling handle_listtriggers")
+            self.bot_module.handle_listtriggers(msg)
+        
+        if hasattr(self.bot_module, 'handle_rmtrigger'):
+            print(f"[DEBUG] Calling handle_rmtrigger")
+            self.bot_module.handle_rmtrigger(msg)
+        
+        # LEADERBOARD COMMANDS (called for every message, filter internally)
+        if hasattr(self.bot_module, 'handle_leaderboard_command'):
+            print(f"[DEBUG] Calling handle_leaderboard_command")
+            self.bot_module.handle_leaderboard_command(msg)
+        
+        # Admin commands
+        if text == "!admins" and hasattr(self.bot_module, 'get_admin_list_text'):
+            admin_text = self.bot_module.get_admin_list_text()
+            if hasattr(self.bot_module, 'send_message'):
+                self.bot_module.send_message(admin_text)
+    
+    def _test_message_flask(self, text, user_name=None, attachments=None, image_path=None):
+        """Test a message for a Flask bot."""
         text = self._rewrite_dummy_targets(text)
         
         def capture_message(msg_text):
