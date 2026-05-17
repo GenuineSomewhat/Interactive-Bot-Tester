@@ -7,6 +7,7 @@ requests>=2.31.0
 # GUI dependencies
 customtkinter>=5.2.0
 pillow>=10.0.0
+pygame
 
 # Build dependencies (optional - only needed for creating executables)
 # pyinstaller>=6.0.0
