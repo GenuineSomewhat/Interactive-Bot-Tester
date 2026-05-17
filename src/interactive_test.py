@@ -12,6 +12,10 @@ from urllib.parse import urlparse
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 from contextlib import ExitStack
+import requests
+import tempfile
+import shutil
+import subprocess
 
 try:
     from PIL import Image
@@ -53,6 +57,211 @@ def load_manifest(bot_dir):
             print(f"[WARNING] Failed to read manifest.json: {e}")
             return None
     return None
+
+
+def ensure_bot_requirements(bot_dir):
+    """
+    Check for requirements.txt in bot directory and install missing dependencies.
+    
+    Args:
+        bot_dir: Directory containing the bot file
+    
+    Returns:
+        True if all requirements are satisfied, False if there were issues
+    """
+    requirements_path = os.path.join(bot_dir, 'requirements.txt')
+    if not os.path.exists(requirements_path):
+        return True  # No requirements file, nothing to do
+    
+    try:
+        with open(requirements_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        # Parse requirements
+        requirements = []
+        for line in lines:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+            # Extract package name (handle version specifiers)
+            pkg_name = line.split('>=')[0].split('==')[0].split('<=')[0].split('>')[0].split('<')[0].split('!=')[0].strip()
+            if pkg_name:
+                requirements.append(pkg_name)
+        
+        if not requirements:
+            return True
+        
+        print(f"[INFO] Found requirements.txt with {len(requirements)} packages")
+        
+        # Check which packages are missing
+        import importlib.util
+        missing = []
+        for pkg in requirements:
+            # Handle special cases where package name != import name
+            import_name = pkg.replace('-', '_')
+            
+            if importlib.util.find_spec(import_name) is None:
+                missing.append(pkg)
+        
+        if missing:
+            print(f"[INFO] Missing packages: {', '.join(missing)}")
+            print(f"[INFO] Installing from {requirements_path}...")
+            
+            # Install requirements
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '-r', requirements_path],
+                capture_output=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                print(f"[INFO] Requirements installed successfully")
+                return True
+            else:
+                print(f"[WARNING] Failed to install some requirements")
+                if result.stderr:
+                    print(f"[WARNING] {result.stderr.decode()[:200]}")
+                return False
+        else:
+            print(f"[INFO] All requirements already installed")
+            return True
+            
+    except Exception as e:
+        print(f"[WARNING] Error checking requirements: {e}")
+        return False
+
+
+def download_from_github(url):
+    """
+    Download a bot file from GitHub or raw content URL.
+    Supports multiple URL formats.
+    
+    Args:
+        url: GitHub URL or raw content URL
+    
+    Returns:
+        Path to downloaded file, or None if failed
+    """
+    temp_dir = tempfile.gettempdir()
+    cache_dir = os.path.join(temp_dir, 'interactive_tester_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Convert GitHub web URL to raw content URL if needed
+    url = url.strip()
+    
+    # Handle GitHub blob URLs (https://github.com/user/repo/blob/branch/path/to/file.py)
+    if 'github.com' in url and '/blob/' in url:
+        # Convert to raw content URL
+        url = url.replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/')
+        print(f"[INFO] Converted GitHub URL to raw content URL")
+    
+    # Handle other git platforms similar to GitHub
+    elif 'gitlab.com' in url and '/-/blob/' in url:
+        # GitLab format
+        url = url.replace('/-/blob/', '/-/raw/')
+        print(f"[INFO] Converted GitLab URL to raw content URL")
+    
+    elif 'gitea' in url.lower() and '/src/' in url:
+        # Gitea format
+        url = url.replace('/src/', '/raw/')
+        print(f"[INFO] Converted Gitea URL to raw content URL")
+    
+    try:
+        print(f"[INFO] Downloading from: {url}")
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        # Extract filename from URL
+        filename = url.split('/')[-1]
+        if not filename.endswith('.py'):
+            filename = 'bot.py'
+        
+        # Create a cache filename based on URL hash to avoid conflicts
+        cache_filename = f"{hash(url) & 0x7fffffff}_{filename}"
+        cache_path = os.path.join(cache_dir, cache_filename)
+        
+        # Write the downloaded content
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        
+        print(f"[SUCCESS] Downloaded to: {cache_path}")
+        return cache_path
+    
+    except requests.exceptions.Timeout:
+        print(f"[ERROR] Request timed out while downloading from {url}")
+        return None
+    except requests.exceptions.HTTPError as e:
+        print(f"[ERROR] HTTP error downloading file: {e}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to download file: {e}")
+        return None
+
+
+def clone_git_repository(url):
+    """
+    Clone a git repository and find a bot file in it.
+    
+    Args:
+        url: Git repository URL (HTTPS or SSH)
+    
+    Returns:
+        Path to discovered bot file, or None if failed
+    """
+    temp_dir = tempfile.gettempdir()
+    clone_dir = os.path.join(temp_dir, 'interactive_tester_repos', f"repo_{hash(url) & 0x7fffffff}")
+    
+    try:
+        # Check if already cloned
+        if os.path.exists(os.path.join(clone_dir, '.git')):
+            print(f"[INFO] Using cached repository")
+        else:
+            print(f"[INFO] Cloning repository: {url}")
+            os.makedirs(os.path.dirname(clone_dir), exist_ok=True)
+            subprocess.run(['git', 'clone', url, clone_dir], check=True, capture_output=True, timeout=30)
+            print(f"[SUCCESS] Repository cloned")
+        
+        # Discover bots in the cloned repository
+        potential_bots = discover_bots(clone_dir)
+        
+        if not potential_bots:
+            print(f"[ERROR] No bot files found in repository")
+            return None
+        elif len(potential_bots) == 1:
+            print(f"[AUTO] Found bot: {potential_bots[0][1]}")
+            return potential_bots[0][0]
+        else:
+            # Show menu for multiple bots
+            print(f"\n[INFO] Found {len(potential_bots)} bots in repository\n")
+            print("="*70)
+            print("BOTS IN REPOSITORY")
+            print("="*70)
+            
+            for i, (path, filename, bot_type) in enumerate(potential_bots, 1):
+                size = os.path.getsize(path)
+                type_label = "[Flask]" if bot_type == 'flask' else "[Polling]"
+                print(f"  {i}. {filename:30} {type_label:12} ({size:,} bytes)")
+            
+            while True:
+                try:
+                    choice = input("\nSelect bot (number or 'q' to cancel): ").strip()
+                    if choice.lower() == 'q':
+                        return None
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(potential_bots):
+                        return potential_bots[idx][0]
+                    print(f"Invalid choice. Enter 1-{len(potential_bots)}")
+                except ValueError:
+                    print("Please enter a valid number")
+    
+    except subprocess.CalledProcessError:
+        print(f"[ERROR] Failed to clone repository. Make sure git is installed and the URL is valid.")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Error cloning repository: {e}")
+        return None
 
 
 def discover_bots(search_dir=None):
@@ -124,7 +333,7 @@ def discover_bots(search_dir=None):
 
 def get_bot_path_startup():
     """
-    Show startup menu to choose between auto-discovery and custom bot path entry.
+    Show startup menu to choose between auto-discovery, custom path, and GitHub/git.
     
     Returns:
         Path to bot module, or None if cancelled
@@ -135,10 +344,11 @@ def get_bot_path_startup():
     print("\nHow would you like to load a bot?\n")
     print("  1. Auto-discover bots in current directory")
     print("  2. Enter a custom bot path/folder")
+    print("  3. Load from GitHub/Git URL")
     print("  q. Quit\n")
     
     while True:
-        choice = input("Select option (1, 2, or 'q'): ").strip().lower()
+        choice = input("Select option (1, 2, 3, or 'q'): ").strip().lower()
         
         if choice == 'q':
             return None
@@ -160,8 +370,11 @@ def get_bot_path_startup():
         elif choice == '2':
             # Custom path entry
             return get_custom_bot_path()
+        elif choice == '3':
+            # GitHub/Git loading
+            return get_github_bot_path()
         else:
-            print("Invalid choice. Enter 1, 2, or 'q'")
+            print("Invalid choice. Enter 1, 2, 3, or 'q'")
 
 
 def select_bot_interactive():
@@ -284,6 +497,60 @@ def get_custom_bot_path():
             continue
 
 
+def get_github_bot_path():
+    """
+    Prompt user to enter a GitHub/Git URL to load a bot from.
+    
+    Returns:
+        Path to bot file, or None if cancelled
+    """
+    print("\n" + "="*70)
+    print("LOAD FROM GITHUB/GIT")
+    print("="*70)
+    print("\nEnter a GitHub or Git URL:")
+    print("Examples:")
+    print("  GitHub file URL:")
+    print("    https://github.com/user/repo/blob/main/bot.py")
+    print("  Raw GitHub URL:")
+    print("    https://raw.githubusercontent.com/user/repo/main/bot.py")
+    print("  GitLab URL:")
+    print("    https://gitlab.com/user/repo/-/blob/main/bot.py")
+    print("  Repository clone URL:")
+    print("    https://github.com/user/repo.git")
+    print("    git@github.com:user/repo.git\n")
+    
+    while True:
+        user_input = input("Git URL (or 'q' to cancel): ").strip()
+        
+        if user_input.lower() == 'q':
+            return None
+        
+        if not user_input:
+            print("URL cannot be empty. Try again.")
+            continue
+        
+        # Determine if it's a raw file URL or a repo URL
+        if user_input.endswith('.py') or '/blob/' in user_input or '/-/blob/' in user_input or '/src/' in user_input:
+            # Treat as single file download
+            return download_from_github(user_input)
+        elif user_input.endswith('.git') or 'github.com' in user_input or 'gitlab.com' in user_input or 'gitea' in user_input.lower():
+            # Treat as repository clone
+            return clone_git_repository(user_input)
+        else:
+            # Ask user which type it is
+            print("\nIs this a:")
+            print("  1. Direct file URL or GitHub web URL")
+            print("  2. Git repository URL\n")
+            
+            choice = input("Select (1 or 2): ").strip()
+            if choice == '1':
+                return download_from_github(user_input)
+            elif choice == '2':
+                return clone_git_repository(user_input)
+            else:
+                print("Invalid choice. Try again.\n")
+
+
 def load_bot_module(bot_module_path):
     """
     Dynamically load a bot module from a file path.
@@ -395,6 +662,7 @@ class InteractiveTester:
         self._load_bot()
         
         self.sent_messages = []
+        self.message_responses = []  # Track responses with attachments
         self.deleted_messages = []
         self.banned_members = []
         self.dummies = {
@@ -411,6 +679,10 @@ class InteractiveTester:
         try:
             # Try to load manifest first
             bot_dir = os.path.dirname(os.path.abspath(self.bot_module_path))
+            
+            # Ensure bot requirements are installed
+            ensure_bot_requirements(bot_dir)
+            
             manifest = load_manifest(bot_dir)
             
             # Extract bot name from manifest if available
@@ -491,11 +763,64 @@ class InteractiveTester:
                 
                 # Auto-detect the webhook route
                 self._detect_webhook_route()
+                
+                # Apply persistent patches for background thread support
+                self._apply_persistent_patches()
         except Exception as e:
             print(f"[ERROR] Failed to load bot: {e}")
             import traceback
             traceback.print_exc()
             raise
+    
+    def _apply_persistent_patches(self):
+        """Apply patches to the bot module that persist across background threads."""
+        def capture_message(msg_text, mentions=None, image_url=None):
+            try:
+                response = {"text": msg_text}
+                if image_url:
+                    response["attachments"] = [{"type": "image", "url": image_url}]
+                self.message_responses.append(response)
+                self.sent_messages.append(msg_text)
+            except Exception as e:
+                print(f"[CAPTURE ERROR] send_message: {e}")
+        
+        def capture_message_with_image(msg_text, image_url, mentions=None, force=False):
+            try:
+                response = {"text": msg_text, "attachments": [{"type": "image", "url": image_url}]}
+                self.message_responses.append(response)
+                self.sent_messages.append(msg_text)
+                print(f"[CAPTURE] Image message captured. URL: {image_url[:60]}...")
+            except Exception as e:
+                print(f"[CAPTURE ERROR] send_message_with_image: {e}")
+        
+        def capture_message_with_ping(msg_text, name, user_id, system=False, image_url=None, force=False):
+            try:
+                response = {"text": msg_text}
+                if image_url:
+                    response["attachments"] = [{"type": "image", "url": image_url}]
+                self.message_responses.append(response)
+                self.sent_messages.append(msg_text)
+            except Exception as e:
+                print(f"[CAPTURE ERROR] send_message_with_ping: {e}")
+        
+        def capture_audio_attachment(audio_url, text="", duration=7, peaks=None):
+            try:
+                response = {"text": text or "(audio clip)", "attachments": [{"type": "audio", "url": audio_url, "duration": duration}]}
+                self.message_responses.append(response)
+                self.sent_messages.append(text or "(audio clip)")
+            except Exception as e:
+                print(f"[CAPTURE ERROR] send_audio_attachment: {e}")
+        
+        # Apply patches to the bot module
+        if hasattr(self.bot_module, 'send_message'):
+            self.bot_module.send_message = capture_message
+        if hasattr(self.bot_module, 'send_message_with_image'):
+            self.bot_module.send_message_with_image = capture_message_with_image
+        if hasattr(self.bot_module, 'send_message_with_ping'):
+            self.bot_module.send_message_with_ping = capture_message_with_ping
+        if hasattr(self.bot_module, 'send_audio_attachment'):
+            self.bot_module.send_audio_attachment = capture_audio_attachment
+
     
     def _load_polling_bot(self):
         """Load a polling bot module."""
@@ -671,6 +996,61 @@ class InteractiveTester:
         except Exception:
             return None
 
+    def _get_audio_duration(self, audio_path):
+        """Try to get audio duration if possible."""
+        try:
+            import wave
+            import struct
+            # Try WAV first
+            if audio_path.lower().endswith('.wav'):
+                with wave.open(audio_path, 'rb') as wav_file:
+                    frames = wav_file.getnframes()
+                    rate = wav_file.getframerate()
+                    duration = frames / float(rate)
+                    return int(duration)
+        except Exception:
+            pass
+        # For other formats, return a default
+        return 7
+
+    def _format_response_display(self, response_text, response_obj=None):
+        """Format response for display, including attachments."""
+        output = response_text
+        
+        if response_obj and "attachments" in response_obj:
+            for att in response_obj["attachments"]:
+                if att.get("type") == "image":
+                    url = att.get("url", "")
+                    try:
+                        output += f"\n        [IMAGE] {url}"
+                    except UnicodeEncodeError:
+                        output += f"\n        [IMAGE] {url}"
+                elif att.get("type") == "audio":
+                    url = att.get("url", "")
+                    duration = att.get("duration", "?")
+                    try:
+                        output += f"\n        [AUDIO] {url} ({duration}s)"
+                    except UnicodeEncodeError:
+                        output += f"\n        [AUDIO] {url} ({duration}s)"
+        
+        return output
+
+    def _display_responses(self, responses):
+        """Display bot responses with formatted attachments."""
+        if not responses:
+            print("(no response)")
+            return
+        
+        print("\nBot responses:")
+        for i, response_text in enumerate(responses, 1):
+            # Find corresponding response object with attachments
+            response_obj = None
+            if hasattr(self, 'message_responses') and i - 1 < len(self.message_responses):
+                response_obj = self.message_responses[i - 1]
+            
+            formatted = self._format_response_display(response_text, response_obj)
+            print(f"  [{i}] {formatted}")
+
     def _build_message_response(self, message_id):
         record = self._message_store.get(message_id)
         attachments = []
@@ -687,6 +1067,13 @@ class InteractiveTester:
                         "original_height": height,
                         "width": width,
                         "height": height
+                    })
+                elif att.get("type") == "audio" and att.get("local_path"):
+                    duration = self._get_audio_duration(att.get("local_path"))
+                    attachments.append({
+                        "type": "audio",
+                        "url": f"local://{message_id}",
+                        "duration": duration
                     })
                 else:
                     attachments.append(att)
@@ -715,14 +1102,33 @@ class InteractiveTester:
                     raise RuntimeError(f"HTTP {self.status_code}")
 
         parsed = urlparse(url)
+        
+        # Handle mock:// URLs for testing (mock://audio/filename.mp3)
+        if parsed.scheme == "mock":
+            if parsed.netloc == "audio":
+                # Extract filename from path
+                filename = parsed.path.lstrip("/")
+                audio_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'bot', 'Audio')
+                file_path = os.path.join(audio_dir, filename)
+                if os.path.isfile(file_path):
+                    try:
+                        with open(file_path, "rb") as f:
+                            content = f.read()
+                        return _FakeResponse(200, content=content)
+                    except Exception:
+                        return _FakeResponse(500, text=f"Failed to read audio file {filename}")
+                return _FakeResponse(404, text=f"Mock audio file not found: {filename}")
+        
         if parsed.scheme == "local":
             message_id = parsed.netloc or parsed.path.lstrip("/")
             record = self._message_store.get(message_id)
             local_path = None
+            attachment_type = None
             if record:
                 for att in record.get("attachments", []):
-                    if att.get("type") == "image" and att.get("local_path"):
+                    if att.get("type") in ("image", "audio") and att.get("local_path"):
                         local_path = att.get("local_path")
+                        attachment_type = att.get("type")
                         break
             if local_path and os.path.isfile(local_path):
                 try:
@@ -730,8 +1136,10 @@ class InteractiveTester:
                         content = f.read()
                     return _FakeResponse(200, content=content)
                 except Exception:
-                    return _FakeResponse(500, text="Failed to read local image")
-            return _FakeResponse(404, text="Local image not found")
+                    att_name = "image" if attachment_type == "image" else "audio"
+                    return _FakeResponse(500, text=f"Failed to read local {att_name}")
+            att_name = "image" if attachment_type == "image" else "audio"
+            return _FakeResponse(404, text=f"Local {att_name} not found")
 
         path_parts = parsed.path.strip("/").split("/")
         if "groups" in path_parts and "messages" in path_parts:
@@ -749,18 +1157,19 @@ class InteractiveTester:
             return self._original_requests_get(url, *args, **kwargs)
         return _FakeResponse(404, text="No handler for URL")
 
-    def test_message(self, text, user_name=None, attachments=None, image_path=None):
+    def test_message(self, text, user_name=None, attachments=None, image_path=None, audio_path=None):
         """Send a message and capture the response."""
         self.sent_messages = []  # Clear previous messages
+        self.message_responses = []  # Clear response objects with attachments
         self.deleted_messages = []
         self.banned_members = []
 
         if self.bot_type == 'polling':
-            return self._test_message_polling(text, user_name, attachments, image_path)
+            return self._test_message_polling(text, user_name, attachments, image_path, audio_path)
         else:
-            return self._test_message_flask(text, user_name, attachments, image_path)
+            return self._test_message_flask(text, user_name, attachments, image_path, audio_path)
     
-    def _test_message_polling(self, text, user_name=None, attachments=None, image_path=None):
+    def _test_message_polling(self, text, user_name=None, attachments=None, image_path=None, audio_path=None):
         """Test a message for a polling bot."""
         text = self._rewrite_dummy_targets(text)
         
@@ -784,6 +1193,13 @@ class InteractiveTester:
                 {
                     "type": "image",
                     "url": f"file://{image_path}"
+                }
+            ]
+        if audio_path:
+            attachments = list(attachments) + [
+                {
+                    "type": "audio",
+                    "url": f"file://{audio_path}"
                 }
             ]
 
@@ -924,12 +1340,13 @@ class InteractiveTester:
             if hasattr(self.bot_module, 'send_message'):
                 self.bot_module.send_message(admin_text)
     
-    def _test_message_flask(self, text, user_name=None, attachments=None, image_path=None):
+    def _test_message_flask(self, text, user_name=None, attachments=None, image_path=None, audio_path=None):
         """Test a message for a Flask bot."""
         text = self._rewrite_dummy_targets(text)
         
-        def capture_message(msg_text):
-            self.sent_messages.append(msg_text)
+        # Clear message responses for this test (persistent patches will capture messages)
+        self.sent_messages = []
+        self.message_responses = []
         
         if user_name:
             user_id = self.dummies.get(user_name, "123")
@@ -945,6 +1362,13 @@ class InteractiveTester:
                 {
                     "type": "image",
                     "local_path": image_path
+                }
+            ]
+        if audio_path:
+            attachments = list(attachments) + [
+                {
+                    "type": "audio",
+                    "local_path": audio_path
                 }
             ]
 
@@ -964,18 +1388,17 @@ class InteractiveTester:
         
         client = self.app.test_client()
         
-        # Dynamically patch bot methods using ExitStack for clean multiple patches
+        # Just post the webhook - persistent patches on the module will capture all messages
+        # (both from the webhook and from any background threads)
         with ExitStack() as stack:
-            if hasattr(self.bot_module, 'send_message'):
-                stack.enter_context(patch.object(self.bot_module, 'send_message', capture_message))
+            if hasattr(self.bot_module, 'requests'):
+                stack.enter_context(patch.object(self.bot_module.requests, 'get', self._mock_requests_get))
             if hasattr(self.bot_module, 'delete_message'):
                 stack.enter_context(patch.object(self.bot_module, 'delete_message', self._capture_delete))
             if hasattr(self.bot_module, 'ban_member'):
                 stack.enter_context(patch.object(self.bot_module, 'ban_member', self._capture_ban))
             if hasattr(self.bot_module, 'api_delete'):
                 stack.enter_context(patch.object(self.bot_module, 'api_delete', return_value=MagicMock()))
-            if hasattr(self.bot_module, 'requests'):
-                stack.enter_context(patch.object(self.bot_module.requests, 'get', self._mock_requests_get))
             
             client.post(self.webhook_route, json=event)
         
@@ -1174,12 +1597,7 @@ class InteractiveTester:
                             print("Dummy not found. Use 'dummy list'.")
                         else:
                             responses = self.test_message(message, name)
-                            if responses:
-                                print("\nBot responses:")
-                                for i, response in enumerate(responses, 1):
-                                    print(f"  [{i}] {response}")
-                            else:
-                                print("(no response)")
+                            self._display_responses(responses)
                             if self.deleted_messages:
                                 print(f"Deleted messages: {self.deleted_messages}")
                             if self.banned_members:
@@ -1187,12 +1605,7 @@ class InteractiveTester:
                 else:
                     # Send message to bot
                     responses = self.test_message(user_input)
-                    if responses:
-                        print("\nBot responses:")
-                        for i, response in enumerate(responses, 1):
-                            print(f"  [{i}] {response}")
-                    else:
-                        print("(no response)")
+                    self._display_responses(responses)
                     if self.deleted_messages:
                         print(f"Deleted messages: {self.deleted_messages}")
                     if self.banned_members:

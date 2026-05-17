@@ -16,7 +16,10 @@ ctk.set_default_color_theme("blue")
 
 # Add parent to path for importing interactive_test
 sys.path.insert(0, str(Path(__file__).parent))
-from interactive_test import InteractiveTester, discover_bots, get_bot_path_startup
+from interactive_test import (
+    InteractiveTester, discover_bots, get_bot_path_startup,
+    download_from_github, clone_git_repository
+)
 
 
 def get_icon_path():
@@ -64,9 +67,13 @@ class BotTesterGUI:
         self.tester = None
         self.selected_image_path = None
         self.selected_image_tk = None
+        self.selected_audio_path = None
         
         # Initialize GUI
         self.setup_ui()
+        
+        # Start periodic refresh of image preview (every 2 seconds)
+        self._schedule_image_refresh()
         
     def setup_ui(self):
         """Create the GUI layout."""
@@ -196,7 +203,42 @@ class BotTesterGUI:
         btn_frame.pack(fill=tk.X, pady=(0, 10))
         
         ctk.CTkButton(btn_frame, text="Pick Image", command=self.pick_image, corner_radius=6).pack(fill=tk.X, pady=2)
+        ctk.CTkButton(btn_frame, text="Refresh", command=self.refresh_image_preview, corner_radius=6).pack(fill=tk.X, pady=2)
         ctk.CTkButton(btn_frame, text="Clear Image", command=self.clear_image, corner_radius=6).pack(fill=tk.X, pady=2)
+        
+        # Audio section
+        audio_label = ctk.CTkLabel(right_frame, text="Audio Preview:", text_color="#2D3436", font=("Arial", 12, "bold"), fg_color="#f5f7f9")
+        audio_label.pack(anchor=tk.W, pady=(10, 5))
+        
+        # Audio frame
+        self.audio_frame = ctk.CTkFrame(right_frame, fg_color="#eff2f7", corner_radius=8, border_width=2, border_color="#d0d8e0")
+        self.audio_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        self.audio_label_display = ctk.CTkLabel(
+            self.audio_frame,
+            text="🔊 No audio selected",
+            text_color="#a8b3c1",
+            font=("Arial", 10),
+            fg_color="#eff2f7"
+        )
+        self.audio_label_display.pack(expand=True)
+        
+        # Audio filename
+        self.audio_filename_label = ctk.CTkLabel(
+            right_frame,
+            text="",
+            text_color="#8a94a6",
+            font=("Arial", 9),
+            fg_color="#f5f7f9"
+        )
+        self.audio_filename_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        # Audio selection buttons
+        audio_btn_frame = ctk.CTkFrame(right_frame, fg_color="#f5f7f9", corner_radius=0)
+        audio_btn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ctk.CTkButton(audio_btn_frame, text="Pick Audio", command=self.pick_audio, corner_radius=6).pack(fill=tk.X, pady=2)
+        ctk.CTkButton(audio_btn_frame, text="Clear Audio", command=self.clear_audio, corner_radius=6).pack(fill=tk.X, pady=2)
         
         # Input area
         input_frame = ctk.CTkFrame(main_frame, fg_color="#f5f7f9", corner_radius=8)
@@ -273,34 +315,123 @@ class BotTesterGUI:
         pass
     
     def load_bot(self):
-        """Show bot selection dialog."""
-        folder_path = filedialog.askdirectory(title="Select bot folder")
-        if not folder_path:
-            return
+        """Show bot selection dialog with options for local, file, or GitHub/Git URL."""
+        # Create a simple dialog to choose loading method
+        dialog_result = messagebox.askquestion(
+            "Load Bot Method",
+            "How would you like to load a bot?\n\n"
+            "Yes = Local folder/file\n"
+            "No = GitHub/Git URL\n\n"
+            "(Choose Yes for local, No for GitHub)",
+            icon=messagebox.QUESTION
+        )
+        
+        if dialog_result == 'yes':
+            # Local folder selection
+            folder_path = filedialog.askdirectory(title="Select bot folder")
+            if not folder_path:
+                return
 
-        try:
-            potential_bots = discover_bots(folder_path)
-            if not potential_bots:
-                messagebox.showerror(
-                    "No bots found",
-                    f"No Flask bots found in:\n{folder_path}"
+            try:
+                potential_bots = discover_bots(folder_path)
+                if not potential_bots:
+                    messagebox.showerror(
+                        "No bots found",
+                        f"No Flask bots found in:\n{folder_path}"
+                    )
+                    self.update_status("No bots found")
+                    return
+
+                if len(potential_bots) == 1:
+                    self.load_bot_from_path(potential_bots[0][0])
+                    return
+
+                file_path = filedialog.askopenfilename(
+                    title="Select bot file",
+                    initialdir=folder_path,
+                    filetypes=[("Python files", "*.py"), ("All files", "*.*")]
                 )
-                self.update_status("No bots found")
+                if file_path:
+                    self.load_bot_from_path(file_path)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load bot: {e}")
+        
+        elif dialog_result == 'no':
+            # GitHub/Git URL loading
+            self.load_bot_from_github()
+    
+    def load_bot_from_github(self):
+        """Load bot from GitHub/Git URL via dialog."""
+        # Create a simple input dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Load from GitHub/Git")
+        dialog.geometry("500x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Instructions
+        instr_label = tk.Label(
+            dialog,
+            text="Enter GitHub/Git URL (file or repository):\n\n"
+            "Examples:\n"
+            "  https://github.com/user/repo/blob/main/bot.py\n"
+            "  https://github.com/user/repo.git",
+            justify=tk.LEFT,
+            font=("Arial", 9)
+        )
+        instr_label.pack(padx=10, pady=10)
+        
+        # Input field
+        url_entry = tk.Entry(dialog, font=("Arial", 10), width=50)
+        url_entry.pack(padx=10, pady=5, fill=tk.X)
+        url_entry.focus()
+        
+        def load_from_url():
+            url = url_entry.get().strip()
+            if not url:
+                messagebox.showwarning("Empty URL", "Please enter a valid GitHub/Git URL")
                 return
+            
+            dialog.destroy()
+            self.update_status(f"Loading from {url[:50]}...")
+            
+            try:
+                # Determine if it's a file or repo URL
+                if url.endswith('.py') or '/blob/' in url or '/-/blob/' in url or '/src/' in url:
+                    bot_path = download_from_github(url)
+                elif url.endswith('.git') or 'github.com' in url or 'gitlab.com' in url or 'gitea' in url.lower():
+                    bot_path = clone_git_repository(url)
+                else:
+                    # Ask user
+                    choice = messagebox.askyesno("URL Type", "Is this a file URL?\n\nYes = File\nNo = Repository")
+                    if choice:
+                        bot_path = download_from_github(url)
+                    else:
+                        bot_path = clone_git_repository(url)
+                
+                if bot_path:
+                    self.load_bot_from_path(bot_path)
+                else:
+                    messagebox.showerror("Loading Failed", "Could not load bot from URL")
+                    self.update_status("Failed to load from GitHub/Git")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load bot from URL: {e}")
+                self.update_status("Error loading from GitHub/Git")
+        
+        # Buttons
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(padx=10, pady=10, fill=tk.X)
+        
+        tk.Button(btn_frame, text="Load", command=load_from_url, bg="#4B7EC9", fg="white", font=("Arial", 10, "bold")).pack(side=tk.RIGHT, padx=5)
+        tk.Button(btn_frame, text="Cancel", command=dialog.destroy, font=("Arial", 10)).pack(side=tk.RIGHT, padx=5)
+    
 
-            if len(potential_bots) == 1:
-                self.load_bot_from_path(potential_bots[0][0])
-                return
-
-            file_path = filedialog.askopenfilename(
-                title="Select bot file",
-                initialdir=folder_path,
-                filetypes=[("Python files", "*.py"), ("All files", "*.*")]
-            )
-            if file_path:
-                self.load_bot_from_path(file_path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load bot: {e}")
     
     def load_bot_from_path(self, bot_path):
         """Load a bot from a specific path."""
@@ -340,6 +471,9 @@ class BotTesterGUI:
             self.chat_display.insert(tk.END, f"✓ Route: {self.tester.webhook_route}\n")
             self.chat_display.insert(tk.END, f"✓ State vars: {', '.join(self.tester.bot_state.keys())}\n\n")
             self.chat_display.config(state=tk.DISABLED)
+            
+            # Update image preview if responses already exist
+            self._update_image_preview_from_responses()
             
             self.update_status(f"Bot loaded: {bot_name}")
             
@@ -387,9 +521,80 @@ class BotTesterGUI:
         """Clear the selected image."""
         self.selected_image_path = None
         self.selected_image_tk = None
-        self.image_label_display.configure(image="", text="No image selected")
+        self.image_label_display.configure(text="No image selected")
         self.image_filename_label.configure(text="")
         self.update_status("Image cleared")
+    
+    def refresh_image_preview(self):
+        """Refresh the image preview from captured bot responses."""
+        self._update_image_preview_from_responses()
+        self.update_status("Image preview refreshed")
+    
+    def _schedule_image_refresh(self):
+        """Schedule periodic refresh of image preview from bot responses."""
+        try:
+            # Only refresh if no user-selected image (to avoid overwriting)
+            if not self.selected_image_path:
+                self._update_image_preview_from_responses()
+        except Exception as e:
+            pass  # Silently ignore errors in auto-refresh
+        
+        # Schedule next refresh in 2 seconds
+        self.root.after(2000, self._schedule_image_refresh)
+    
+    def _update_image_preview_from_responses(self):
+        """Extract latest image URL from captured message responses and display it."""
+        if not self.tester:
+            return
+        
+        if not self.tester.message_responses:
+            return
+        
+        # Look for the most recent message with an image attachment
+        for response in reversed(self.tester.message_responses):
+            if 'attachments' in response:
+                for attachment in response['attachments']:
+                    if attachment.get('type') == 'image':
+                        image_url = attachment.get('url', '')
+                        if image_url:
+                            # Display the image URL in the preview area
+                            url_display = f"[BOT IMAGE]\n{image_url[:65]}..."
+                            self.image_label_display.configure(text=url_display, text_color="#2D3436")
+                            self.image_filename_label.configure(text="From bot response")
+                            return
+    
+    def pick_audio(self):
+        """Let user pick an audio file."""
+        if not self.tester:
+            messagebox.showwarning("Warning", "Load a bot first")
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Select an audio file",
+            filetypes=[("Audio files", "*.mp3 *.m4a *.wav *.ogg *.flac"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            self.selected_audio_path = file_path
+            self.display_audio_preview(file_path)
+            self.update_status(f"Audio selected: {Path(file_path).name}")
+    
+    def display_audio_preview(self, audio_path):
+        """Display audio preview in the preview area."""
+        try:
+            filename = Path(audio_path).name
+            self.audio_label_display.configure(text=f"🔊 {filename}")
+            self.audio_filename_label.configure(text=filename)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load audio: {e}")
+            self.clear_audio()
+    
+    def clear_audio(self):
+        """Clear the selected audio."""
+        self.selected_audio_path = None
+        self.audio_label_display.configure(text="🔊 No audio selected")
+        self.audio_filename_label.configure(text="")
+        self.update_status("Audio cleared")
     
     def on_user_change(self, event=None):
         """Handle user selection change."""
@@ -412,16 +617,19 @@ class BotTesterGUI:
         
         try:
             # If image is selected, mention it
+            display_msg_parts = [f"[{self.tester.active_user}] {message}"]
             if self.selected_image_path:
-                display_msg = f"[{self.tester.active_user}] {message}\n📎 Image: {Path(self.selected_image_path).name}\n"
-            else:
-                display_msg = f"[{self.tester.active_user}] {message}\n"
+                display_msg_parts.append(f"📎 Image: {Path(self.selected_image_path).name}")
+            if self.selected_audio_path:
+                display_msg_parts.append(f"🔊 Audio: {Path(self.selected_audio_path).name}")
+            display_msg = "\n".join(display_msg_parts) + "\n"
             
             # Send message
             responses = self.tester.test_message(
                 message,
                 user_name=self.tester.active_user,
-                image_path=self.selected_image_path
+                image_path=self.selected_image_path,
+                audio_path=self.selected_audio_path
             )
             
             # Display in chat
@@ -446,6 +654,9 @@ class BotTesterGUI:
             self.chat_display.insert(tk.END, "\n")
             self.chat_display.see(tk.END)  # Scroll to bottom
             self.chat_display.config(state=tk.DISABLED)
+            
+            # Extract and display any image URLs from captured responses
+            self._update_image_preview_from_responses()
             
             # Clear input
             self.message_input.delete("1.0", tk.END)
