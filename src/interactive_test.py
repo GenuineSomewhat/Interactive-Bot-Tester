@@ -138,6 +138,7 @@ class InteractiveTester:
         self.app = None
         self.sent_messages = []
         self.message_responses = []
+        self.startup_message = None  # Capture startup message from bot
         self.webhook_route = "/"
         self._message_id_counter = 1
         self._load_bot()
@@ -154,8 +155,14 @@ class InteractiveTester:
         # Apply persistent patches to capture messages
         self._apply_patches()
         
+        # Wait for startup message if bot sends one
+        print(f"[INFO] Waiting for startup message...")
+        time.sleep(3)
+        
         print(f"[INFO] Bot loaded successfully")
         print(f"[INFO] Webhook route: {self.webhook_route}")
+        if self.startup_message:
+            print(f"[INFO] Startup message: {self.startup_message}")
     
     def _detect_webhook_route(self):
         """Auto-detect the webhook route for POST requests."""
@@ -270,8 +277,16 @@ class InteractiveTester:
             """Intercept GroupMe API calls (as fallback if they somehow get through)."""
             # Intercept GroupMe bot message sends
             if "api.groupme.com/v3/bots/post" in url:
+                # Capture startup message if it hasn't been captured yet
+                if kwargs.get('json') and kwargs['json'].get('text'):
+                    msg_text = kwargs['json']['text']
+                    # Check if this looks like a startup message (not from user input)
+                    if not tester.sent_messages and tester.startup_message is None:
+                        # This is likely the startup message sent during initialization
+                        tester.startup_message = msg_text
+                
                 class FakeResponse:
-                    status_code = 201
+                    status_code = 202
                     text = '{"response": {}}'
                     def json(self):
                         return {"response": {}}
@@ -508,6 +523,10 @@ def run_interactive():
     print("="*70)
     print(f"Bot: {Path(bot_path).name}")
     print(f"Webhook route: {tester.webhook_route}")
+    
+    if tester.startup_message:
+        print(f"\n📨 Startup Message: {tester.startup_message}")
+    
     print("\nType messages to send to the bot.")
     print("Type 'quit' to exit.")
     print("="*70 + "\n")
