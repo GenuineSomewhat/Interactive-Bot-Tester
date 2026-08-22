@@ -473,7 +473,8 @@ class InteractiveTester:
             "name": user_name,
             "text": text,
             "created_at": int(time.time()),
-            "attachments": attachments
+            "attachments": attachments,
+            "group_id": "test_group_123"  # Required for addon system to process (not a DM)
         }
         
         # Post to webhook
