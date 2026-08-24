@@ -1,4 +1,6 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 source .venv/bin/activate
-python src/interactive_gui.py
+# Run the GUI in the background and detach from terminal
+python src/interactive_gui.py "$1" &
+disown

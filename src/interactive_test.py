@@ -7,8 +7,85 @@ import os
 import sys
 import importlib.util
 import time
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+# Setup logging - only use file handler when frozen to avoid GUI conflicts
+import logging
+
+# Create a simple logger that uses print() when frozen (PyInstaller)
+class SimpleLogger:
+    def info(self, msg):
+        print(f"[INFO] {msg}")
+    def warning(self, msg):
+        print(f"[WARNING] {msg}")
+    def error(self, msg, exc_info=False):
+        print(f"[ERROR] {msg}")
+        if exc_info:
+            import traceback
+            traceback.print_exc()
+    def debug(self, msg):
+        print(f"[DEBUG] {msg}")
+
+if getattr(sys, 'frozen', False):
+    # Running from PyInstaller - use simple print-based logging
+    _logger = SimpleLogger()
+else:
+    # Running from source - use file logging
+    _log_file = Path.home() / "tester_debug.log"
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(_log_file),
+            logging.StreamHandler()
+        ]
+    )
+    _logger = logging.getLogger(__name__)
+
+_logger.info("Interactive Tester starting")
+
+# Patch subprocess to log calls (skip if frozen to reduce overhead)
+if not getattr(sys, 'frozen', False):
+    import subprocess as _subprocess_module
+    _original_popen = _subprocess_module.Popen
+    _original_run = _subprocess_module.run
+    _original_check_output = _subprocess_module.check_output
+
+    def _logged_popen(*args, **kwargs):
+        _logger.warning(f"SUBPROCESS POPEN CALLED: args={args}, kwargs={kwargs}")
+        import traceback
+        _logger.warning("Traceback:\n" + "".join(traceback.format_stack()))
+        return _original_popen(*args, **kwargs)
+
+    def _logged_run(*args, **kwargs):
+        _logger.warning(f"SUBPROCESS RUN CALLED: args={args}, kwargs={kwargs}")
+        import traceback
+        _logger.warning("Traceback:\n" + "".join(traceback.format_stack()))
+        return _original_run(*args, **kwargs)
+
+    def _logged_check_output(*args, **kwargs):
+        _logger.warning(f"SUBPROCESS CHECK_OUTPUT CALLED: args={args}, kwargs={kwargs}")
+        import traceback
+        _logger.warning("Traceback:\n" + "".join(traceback.format_stack()))
+        return _original_check_output(*args, **kwargs)
+
+    _subprocess_module.Popen = _logged_popen
+    _subprocess_module.run = _logged_run
+    _subprocess_module.check_output = _logged_check_output
+
+    # Also patch os.startfile on Windows
+    if hasattr(os, 'startfile'):
+        _original_startfile = os.startfile
+        def _logged_startfile(path, *args, **kwargs):
+            _logger.warning(f"OS.STARTFILE CALLED: path={path}, args={args}, kwargs={kwargs}")
+            import traceback
+            _logger.warning("Traceback:\n" + "".join(traceback.format_stack()))
+            return _original_startfile(path, *args, **kwargs)
+        os.startfile = _logged_startfile
+else:
+    print("[STARTUP] Running from frozen executable - subprocess logging disabled")
 
 try:
     from PIL import Image
@@ -48,6 +125,264 @@ def _find_flask_app_in_folder(folder_path):
     return None
 
 
+def _install_requirements(bot_dir):
+    """
+    Install requirements.txt from bot directory to current venv.
+    
+    Args:
+        bot_dir: Directory containing the bot (to find requirements.txt)
+    
+    Returns:
+        List of installed packages (from requirements.txt)
+    """
+    import subprocess
+    
+    requirements_file = os.path.join(bot_dir, "requirements.txt")
+    installed = []
+    
+    if not os.path.exists(requirements_file):
+        print(f"[INFO] No requirements.txt found in {bot_dir}")
+        return installed
+    
+    print(f"[INFO] Installing requirements from {requirements_file}...")
+    
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", requirements_file],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            print(f"[INFO] Requirements installed successfully")
+            # Parse requirements file to get package names
+            try:
+                with open(requirements_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            pkg = line.split('==')[0].split('>=')[0].split('<=')[0].strip()
+                            if pkg:
+                                installed.append(pkg)
+            except:
+                pass
+        else:
+            print(f"[WARNING] pip install returned code {result.returncode}")
+            if result.stderr:
+                print(f"[WARNING] pip stderr: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        print(f"[WARNING] Requirements installation timed out")
+    except Exception as e:
+        print(f"[WARNING] Failed to install requirements: {e}")
+    
+    return installed
+
+
+def _get_addon_requirements(bot_dir):
+    """
+    Scan addon files for ADDON_REQUIRES declarations WITHOUT importing them.
+    Parse the files using AST to extract requirements safely.
+    
+    Args:
+        bot_dir: Bot directory (to find addons folder)
+    
+    Returns:
+        List of addon requirement package names
+    """
+    import ast
+    
+    addon_requirements = set()
+    
+    try:
+        addons_dir = os.path.join(bot_dir, "addons")
+        if not os.path.isdir(addons_dir):
+            return []
+        
+        # Scan addon files WITHOUT importing them
+        for filename in os.listdir(addons_dir):
+            if filename.startswith('addon_') and filename.endswith('.py'):
+                try:
+                    addon_path = os.path.join(addons_dir, filename)
+                    with open(addon_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Parse the file using AST
+                    tree = ast.parse(content)
+                    
+                    # Look for ADDON_REQUIRES = [...]
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Assign):
+                            for target in node.targets:
+                                if isinstance(target, ast.Name) and target.id == 'ADDON_REQUIRES':
+                                    if isinstance(node.value, ast.List):
+                                        for elt in node.value.elts:
+                                            if isinstance(elt, ast.Constant):
+                                                req = elt.value
+                                                if isinstance(req, str):
+                                                    # Normalize package name (strip version specs)
+                                                    pkg = req.split('==')[0].split('>=')[0].split('<=')[0].strip()
+                                                    if pkg:
+                                                        addon_requirements.add(pkg)
+                                                        print(f"[INFO] Found addon requirement from {filename}: {pkg}")
+                except Exception as e:
+                    print(f"[DEBUG] Could not parse {filename} for ADDON_REQUIRES: {e}")
+        
+        return sorted(list(addon_requirements))
+    except Exception as e:
+        print(f"[DEBUG] Error scanning addon requirements: {e}")
+        return []
+
+
+def _get_python_executable():
+    """
+    Get the real Python executable.
+    When running from PyInstaller, sys.executable points to the .exe, so we need to find the real Python.
+    """
+    python_exe = sys.executable
+    
+    # If we're running from PyInstaller, find the real Python
+    if getattr(sys, 'frozen', False):
+        _logger.info(f"Running from PyInstaller (sys.frozen={sys.frozen}), looking for real Python interpreter")
+        # Try to find python.exe in common locations
+        possible_pythons = [
+            os.path.join(os.path.dirname(__file__), '..', '.venv', 'Scripts', 'python.exe'),
+            os.path.join(Path.home(), 'AppData', 'Local', 'Programs', 'Python', 'Python314', 'python.exe'),
+            os.path.join(Path.home(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe'),
+            os.path.join(Path.home(), 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'python.exe'),
+        ]
+        for py_path in possible_pythons:
+            if os.path.exists(py_path):
+                python_exe = py_path
+                _logger.info(f"Found Python at: {python_exe}")
+                return python_exe
+        
+        _logger.warning(f"Could not find real Python interpreter, trying 'python' from PATH")
+        python_exe = "python"
+    
+    return python_exe
+
+
+def _install_addon_requirements(addon_requirements):
+    """
+    Install addon requirements to current venv.
+    
+    Args:
+        addon_requirements: List of package names to install
+    """
+    if not addon_requirements:
+        return
+    
+    # Check if packages are already installed
+    installed_all = True
+    for pkg in addon_requirements:
+        try:
+            # Map package names to import names (e.g., python-Levenshtein -> Levenshtein)
+            import_name = pkg.replace('-', '_').split('[')[0].split('==')[0]
+            __import__(import_name)
+        except ImportError:
+            installed_all = False
+            break
+    
+    if installed_all:
+        print(f"[INFO] Addon requirements already installed: {', '.join(addon_requirements)}")
+        return
+    
+    import subprocess
+    
+    print(f"[INFO] Installing addon requirements: {', '.join(addon_requirements)}")
+    
+    python_exe = _get_python_executable()
+    print(f"[INFO] Using Python: {python_exe}")
+    
+    # Suppress console window on Windows
+    kwargs = {
+        'capture_output': True,
+        'text': True,
+        'timeout': 120
+    }
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "install"] + addon_requirements,
+            **kwargs
+        )
+        
+        if result.returncode == 0:
+            print(f"[INFO] Addon requirements installed successfully")
+        else:
+            print(f"[WARNING] pip install returned code {result.returncode}")
+            if result.stderr:
+                print(f"[WARNING] pip stderr: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        print(f"[WARNING] Addon requirements installation timed out")
+    except Exception as e:
+        print(f"[WARNING] Failed to install addon requirements: {e}")
+
+
+def _install_requirements(bot_dir):
+    """
+    Install requirements.txt from bot directory to current venv.
+    
+    Args:
+        bot_dir: Directory containing the bot (to find requirements.txt)
+    
+    Returns:
+        List of installed packages (from requirements.txt)
+    """
+    import subprocess
+    
+    # Skip pip install if running from frozen executable (PyInstaller)
+    # All dependencies are already bundled in the .exe
+    if getattr(sys, 'frozen', False):
+        print(f"[INFO] Running from frozen executable - skipping pip install (all dependencies bundled)")
+        return
+    
+    # Also skip if in TESTING_MODE
+    if os.environ.get("TESTING_MODE") == "1":
+        print(f"[INFO] TESTING_MODE enabled - skipping pip install")
+        return
+    
+    requirements_file = os.path.join(bot_dir, "requirements.txt")
+    
+    if not os.path.exists(requirements_file):
+        print(f"[INFO] No requirements.txt found in {bot_dir}")
+        return
+    
+    print(f"[INFO] Installing requirements from {requirements_file}...")
+    
+    python_exe = _get_python_executable()
+    print(f"[INFO] Using Python: {python_exe}")
+    
+    # Suppress console window on Windows
+    kwargs = {
+        'capture_output': True,
+        'text': True,
+        'timeout': 120
+    }
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "install", "-r", requirements_file],
+            **kwargs
+        )
+        
+        if result.returncode == 0:
+            print(f"[INFO] Requirements installed successfully")
+        else:
+            print(f"[WARNING] pip install returned code {result.returncode}")
+            if result.stderr:
+                print(f"[WARNING] pip stderr: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        print(f"[WARNING] Requirements installation timed out")
+    except Exception as e:
+        print(f"[WARNING] Failed to install requirements: {e}")
+
+
 def load_bot_module(bot_path):
     """
     Load a Flask bot module from a file or folder path.
@@ -58,6 +393,9 @@ def load_bot_module(bot_path):
     Returns:
         Tuple of (module, flask_app)
     """
+    _logger.info(f"=== LOAD_BOT_MODULE STARTING ===")
+    _logger.info(f"bot_path: {bot_path}")
+    _logger.info(f"Current sys.modules has {len(sys.modules)} modules")
     if not os.path.isabs(bot_path):
         bot_path = os.path.abspath(bot_path)
     
@@ -82,9 +420,13 @@ def load_bot_module(bot_path):
             sys.path.insert(0, bot_dir)
         
         # Set environment variables for testing
+        os.environ["TESTING_MODE"] = "1"  # Signal bot to disable background threads
         os.environ.setdefault("ACCESS_TOKEN", "test_token_12345")
         os.environ.setdefault("GROUP_ID", "test_group_123")
         os.environ.setdefault("BOT_ID", "test_bot_123")
+        
+        _logger.info(f"About to import bot module: {bot_path}")
+        _logger.info(f"TESTING_MODE set to: {os.environ.get('TESTING_MODE')}")
         
         # Clear cached module if it exists
         module_name = Path(bot_path).stem
@@ -96,7 +438,27 @@ def load_bot_module(bot_path):
         spec = importlib.util.spec_from_file_location(module_name, bot_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        _logger.info("About to call spec.loader.exec_module()")
+        _logger.info(f"sys.modules count before: {len(sys.modules)}")
+        
+        import sys as sys_before
+        threads_before = threading.enumerate()
+        _logger.info(f"Threads before exec_module: {[t.name for t in threads_before]}")
+        
+        try:
+            _logger.info(">>> CALLING spec.loader.exec_module() <<<")
+            spec.loader.exec_module(module)
+            _logger.info(">>> spec.loader.exec_module() RETURNED <<<")
+        except Exception as e:
+            _logger.error(f"Error during exec_module: {e}", exc_info=True)
+            raise
+        
+        _logger.info(f"sys.modules count after: {len(sys.modules)}")
+        _logger.info(f"Module loaded successfully: {module_name}")
+        threads_after = threading.enumerate()
+        new_threads = [t for t in threads_after if t not in threads_before]
+        if new_threads:
+            _logger.warning(f"New threads created during exec_module: {[t.name for t in new_threads]}")
         
         # Find Flask app instance
         flask_app = None
@@ -127,6 +489,7 @@ class InteractiveTester:
     
     def __init__(self, bot_path):
         """Initialize tester with bot module path."""
+        print("[TESTER INIT] Starting InteractiveTester.__init__")
         self.bot_path = bot_path
         # Determine bot directory
         if os.path.isdir(bot_path):
@@ -141,26 +504,51 @@ class InteractiveTester:
         self.startup_message = None  # Capture startup message from bot
         self.webhook_route = "/"
         self._message_id_counter = 1
+        print("[TESTER INIT] About to call _load_bot()")
         self._load_bot()
+        print("[TESTER INIT] _load_bot() completed successfully")
     
     def _load_bot(self):
         """Load bot module and apply message capture patches."""
-        print(f"[INFO] Loading bot from {self.bot_path}")
+        print("[TESTER _LOAD_BOT] Starting _load_bot()")
+        _logger.info(f"Loading bot from {self.bot_path}")
         
+        # Install requirements from bot directory
+        bot_dir = self.bot_path if os.path.isdir(self.bot_path) else os.path.dirname(self.bot_path)
+        print("[TESTER _LOAD_BOT] About to install requirements")
+        _install_requirements(bot_dir)
+        print("[TESTER _LOAD_BOT] Requirements installed")
+        
+        # Scan and install addon requirements BEFORE loading bot
+        print("[TESTER _LOAD_BOT] Scanning addon requirements")
+        addon_reqs = _get_addon_requirements(bot_dir)
+        if addon_reqs:
+            print(f"[TESTER _LOAD_BOT] Installing addon requirements: {addon_reqs}")
+            _logger.info(f"Installing addon requirements: {', '.join(addon_reqs)}")
+            _install_addon_requirements(addon_reqs)
+        print("[TESTER _LOAD_BOT] About to load bot module...")
+        
+        _logger.info("About to call load_bot_module()")
+        print("[TESTER _LOAD_BOT] Calling load_bot_module()...")
         self.bot_module, self.app = load_bot_module(self.bot_path)
+        print("[TESTER _LOAD_BOT] load_bot_module() completed!")
+        _logger.info("load_bot_module() completed")
         
         # Detect webhook route
+        print("[TESTER _LOAD_BOT] Detecting webhook route")
         self._detect_webhook_route()
         
         # Apply persistent patches to capture messages
+        print("[TESTER _LOAD_BOT] Applying patches")
         self._apply_patches()
         
         # Wait for startup message if bot sends one
-        print(f"[INFO] Waiting for startup message...")
+        print("[TESTER _LOAD_BOT] Waiting for startup message")
+        _logger.info("Waiting for startup message...")
         time.sleep(3)
         
-        print(f"[INFO] Bot loaded successfully")
-        print(f"[INFO] Webhook route: {self.webhook_route}")
+        _logger.info("Bot loaded successfully")
+        _logger.info(f"Webhook route: {self.webhook_route}")
         if self.startup_message:
             print(f"[INFO] Startup message: {self.startup_message}")
     
@@ -232,7 +620,7 @@ class InteractiveTester:
                 tester.message_responses.append(response)
                 return True  # Return True to indicate success
             except Exception as e:
-                print(f"[CAPTURE ERROR] send_message: {e}")
+                print("[CAPTURE ERROR]:", str(e))
                 return False
         
         def capture_image_message(msg_text, image_url=None, **kwargs):
@@ -328,6 +716,52 @@ class InteractiveTester:
         if hasattr(self.bot_module, 'send_message_with_ping'):
             self.bot_module.send_message_with_ping = lambda msg_text, name=None, user_id=None, **kw: capture_message(msg_text, **kw)
         
+        # IMPORTANT: Also patch addon system's send callbacks
+        # The addon system has already captured references, so we need to update those
+        try:
+            from addons import get_translator
+            from addons.core import Addon
+            translator = get_translator()
+            if translator.context:
+                # Create wrapper that logs when send_message is called
+                original_addon_send = translator.context.send_message
+                def addon_send_wrapper(msg_text, **kwargs):
+                    print(f"[ADDON SEND INTERCEPTED] '{msg_text[:60]}...'")
+                    return capture_message(msg_text, **kwargs)
+                
+                translator.context.send_message = addon_send_wrapper
+                translator.context.send_message_with_image = capture_image_message
+                print("[PATCH DEBUG] Patched addon system context send_message")
+                print(f"[PATCH DEBUG] Translator context object: {id(translator.context)}")
+                
+                # Also patch Addon.send() method itself to log calls
+                original_addon_send_method = Addon.send
+                def addon_send_method_wrapper(self, text):
+                    print(f"[ADDON.SEND() CALLED] '{text[:60]}...', has_context={self.context is not None}")
+                    if self.context:
+                        print(f"[ADDON.SEND() DEBUG] context_id={id(self.context)}, has_send_message={hasattr(self.context, 'send_message')}, send_message={self.context.send_message}")
+                        if self.context.send_message:
+                            print(f"[ADDON.SEND() DEBUG] Calling context.send_message...")
+                    else:
+                        print(f"[ADDON.SEND() ERROR] No context set on addon!")
+                    return original_addon_send_method(self, text)
+                
+                Addon.send = addon_send_method_wrapper
+                print("[PATCH DEBUG] Patched Addon.send() method")
+                
+                # Also patch Addon.handle_message to log calls
+                original_handle_message = Addon.handle_message
+                def handle_message_wrapper(self, text):
+                    print(f"[ADDON.HANDLE_MESSAGE() CALLED] text='{text[:60]}...'")
+                    return original_handle_message(self, text)
+                
+                Addon.handle_message = handle_message_wrapper
+                print("[PATCH DEBUG] Patched Addon.handle_message() method")
+        except Exception as e:
+            print(f"[DEBUG] Could not patch addon context: {e}")
+            import traceback
+            traceback.print_exc()
+        
         # IMPORTANT: Also patch game modules (plane_game, gun_game) send functions
         # so background threads can use them
         try:
@@ -336,7 +770,15 @@ class InteractiveTester:
             plane_game.send_message_with_image = capture_image_message
             print("[INFO] Patched plane_game send functions")
         except Exception as e:
-            print(f"[DEBUG] Could not patch plane_game: {e}")
+            print(f"[DEBUG] Could not patch plane_game (root): {e}")
+        
+        try:
+            from lib import plane_game as lib_plane_game
+            lib_plane_game.send_message = capture_message
+            lib_plane_game.send_message_with_image = capture_image_message
+            print("[INFO] Patched lib.plane_game send functions")
+        except Exception as e:
+            print(f"[DEBUG] Could not patch lib.plane_game: {e}")
         
         try:
             import gun_game
@@ -344,7 +786,15 @@ class InteractiveTester:
             gun_game.send_message_with_image = capture_image_message
             print("[INFO] Patched gun_game send functions")
         except Exception as e:
-            print(f"[DEBUG] Could not patch gun_game: {e}")
+            print(f"[DEBUG] Could not patch gun_game (root): {e}")
+        
+        try:
+            from lib import gun_game as lib_gun_game
+            lib_gun_game.send_message = capture_message
+            lib_gun_game.send_message_with_image = capture_image_message
+            print("[INFO] Patched lib.gun_game send functions")
+        except Exception as e:
+            print(f"[DEBUG] Could not patch lib.gun_game: {e}")
         
         # Patch image upload to skip uploading in test mode
         if hasattr(self.bot_module, 'upload_image_to_groupme'):
@@ -494,6 +944,43 @@ class InteractiveTester:
             print(f"[ERROR] Webhook post failed: {e}")
         
         return self.sent_messages
+    
+    def get_active_skin_pfp(self):
+        """
+        Get the active skin's PFP if available.
+        
+        Returns:
+            Path to skin's pfp.png if active and exists, None if skin active but no pfp,
+            or default bot PFP path if no skin active.
+        """
+        import json
+        
+        # Try to load active_skin.json
+        active_skin_path = os.path.join(self.bot_dir, 'active_skin.json')
+        
+        try:
+            if os.path.isfile(active_skin_path):
+                with open(active_skin_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    active_skin = data.get('skin')
+                    
+                    if active_skin:
+                        # Check if skin folder has pfp.png
+                        skin_pfp_path = os.path.join(self.bot_dir, 'addons', active_skin, 'pfp.png')
+                        if os.path.isfile(skin_pfp_path):
+                            return skin_pfp_path
+                        else:
+                            # Skin active but no PFP
+                            return None
+        except Exception as e:
+            _logger.debug(f"Error reading active_skin.json: {e}")
+        
+        # No skin active - return default PFP path
+        default_pfp = os.path.join(self.bot_dir, 'ClankerPFP.png')
+        if os.path.isfile(default_pfp):
+            return default_pfp
+        
+        return None
 
 
 def run_interactive():

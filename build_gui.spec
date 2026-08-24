@@ -1,24 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec file for GUI version
-
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+# PyInstaller spec file for Interactive Bot Tester GUI
 
 block_cipher = None
 
-# Collect all customtkinter files
-ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
-
 a = Analysis(
     ['src/interactive_gui.py'],
-    pathex=[],
-    binaries=ctk_binaries,
-    datas=ctk_datas + [('icon.ico', '.')],  # Include icon.ico in root of executable
+    pathex=['src'],  # Add src to path so it can find modules
+    binaries=[],
+    datas=[('src/interactive_test.py', 'src'), ('icon.ico', '.')],  # Bundle interactive_test.py and icon
     hiddenimports=[
-        'customtkinter',
-        'customtkinter.windows',
-        'customtkinter.windows.widgets',
+        'interactive_test',
         'PIL',
-        'PIL._tkinter_finder',
         'PIL.Image',
         'PIL.ImageTk',
         'PIL.ImageDraw',
@@ -36,16 +28,24 @@ a = Analysis(
         'importlib.metadata',
         'json',
         'tkinter',
+        'tkinter.ttk',
         'tkinter.scrolledtext',
         'tkinter.filedialog',
         'tkinter.messagebox',
+        'urllib',
+        'urllib.request',
+        'urllib.error',
+        'subprocess',
+        'threading',
+        'pathlib',
+        # Bot dependencies
         'fuzzywuzzy',
         'fuzzywuzzy.fuzz',
         'fuzzywuzzy.process',
-        'Levenshtein',
         'requests',
-        'pygame',
-    ] + ctk_hiddenimports,
+        'google',
+        'google.generativeai',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -78,5 +78,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',  # Use icon.ico file
+    icon='icon.ico',
+    onefile=True,  # Single executable file
 )
