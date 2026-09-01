@@ -78,22 +78,29 @@ class TerminalCapture:
 
 class BotTestTab:
     """Represents a single bot test tab with its own tester and UI."""
-    def __init__(self, notebook, parent_gui):
+    def __init__(self, notebook, parent_gui, tab_number=1):
         self.parent_gui = parent_gui
         self.tester = None  # Will be InteractiveTester instance when bot is loaded
         self.bot_path = None
         self.photo_images = []  # Store image references to prevent garbage collection
+        self.tab_number = tab_number
         
-        # Create tab frame
+        # Tab-specific terminal widget
+        self.terminal_widget = None  # Will be created by parent GUI
+        
+        # Test settings for this tab
+        self.current_user_role = "admin"  # admin or user
+        self.current_error_code = None  # 409, 404, 503, etc
+        
+        # Create tab frame (for notebook)
         self.frame = ttk.Frame(notebook)
-        notebook.add(self.frame, text="[No Bot]")
+        notebook.add(self.frame, text=f"Tab {tab_number} ✕")
         self.tab_index = notebook.index(self.frame)
         self.notebook = notebook
         
-        # Chat display using Canvas for bubbles
+        # Chat display using Canvas for bubbles (will be embedded in parent's chat_container)
         self.chat_canvas = tk.Canvas(
             self.frame,
-            height=18,
             bg="#ffffff",
             highlightthickness=0
         )
@@ -159,7 +166,7 @@ class BotTestTab:
         
         return ImageTk.PhotoImage(img)
     
-    def _create_message_bubble(self, text, is_bot=True, pfp_widget=None):
+    def _create_message_bubble(self, text, is_bot=True, pfp_widget=None, user_role=None):
         """Create a styled message bubble widget."""
         # Check if this is a system message
         is_system = text.strip().startswith('[') and any(tag in text for tag in ['[INFO]', '[SUCCESS]', '[ERROR]', '[BOT]'])
@@ -211,6 +218,16 @@ class BotTestTab:
             # Regular message - left or right aligned
             bubble_frame = tk.Frame(self.chat_frame, bg="#ffffff")
             bubble_frame.pack(fill=tk.X, padx=10, pady=5)
+            
+            # Display user name/role above message if not bot
+            if not is_bot and user_role:
+                name_frame = tk.Frame(bubble_frame, bg="#ffffff")
+                name_frame.pack(fill=tk.X, padx=(50, 0), pady=(0, 2))
+                
+                # Capitalize and format the user role
+                role_display = user_role.title() if user_role else "User"
+                name_label = tk.Label(name_frame, text=f"{role_display}:", font=("Arial", 9, "bold"), bg="#ffffff", fg="#0078ff")
+                name_label.pack(side=tk.RIGHT)
             
             # Inner bubble with colored background
             if is_bot:
@@ -300,11 +317,11 @@ class BotTestTab:
         if self.bot_path:
             title = Path(self.bot_path).name
         else:
-            title = "[No Bot]"
-        self.notebook.tab(self.tab_index, text=title)
+            title = f"Tab {self.tab_number}"
+        self.notebook.tab(self.tab_index, text=f"{title} ✕")
     
-    def display_message(self, text, is_bot=True):
-        """Add text to chat display as a styled bubble."""
+    def display_message(self, text, is_bot=True, user_role=None):
+        """Add text to chat display as a styled bubble. Thread-safe via root.after()."""
         try:
             if not hasattr(self, 'chat_frame') or not self.chat_frame:
                 print(f"[DEBUG] chat_frame not available")
@@ -315,18 +332,19 @@ class BotTestTab:
             if not text:
                 return
             
-            # Create bubble
-            self._create_message_bubble(text, is_bot=is_bot)
+            # Schedule GUI update on main thread
+            def update_gui():
+                try:
+                    # Create bubble on main thread
+                    self._create_message_bubble(text, is_bot=is_bot, user_role=user_role)
+                    
+                    # Scroll to bottom
+                    self.chat_canvas.yview_moveto(1.0)
+                except Exception as e:
+                    print(f"[DEBUG] Error in GUI update: {e}")
             
-            # Scroll to bottom
-            self.chat_canvas.yview_moveto(1.0)
-            
-            # Safely update root
-            try:
-                self.parent_gui.root.update()
-            except tk.TclError:
-                print(f"[DEBUG] TclError updating root")
-                pass
+            # Use root.after() to schedule on main thread (thread-safe)
+            self.parent_gui.root.after(0, update_gui)
         except Exception as e:
             print(f"[DEBUG] display_message error: {e}")
 
@@ -401,15 +419,11 @@ class SimpleBotTesterGUI:
         """Create the GUI layout with tabs."""
         try:
             # Top frame - controls
-            top_frame = tk.Frame(self.root, bg="#f0f0f0", height=60)
+            top_frame = tk.Frame(self.root, bg="#f0f0f0")
             top_frame.pack(fill=tk.X, side=tk.TOP, padx=10, pady=10)
-            top_frame.pack_propagate(False)
             
             tk.Label(top_frame, text="Bot Tester", font=("Arial", 14, "bold"), bg="#f0f0f0").pack(side=tk.LEFT, padx=10, pady=10)
-            
             tk.Button(top_frame, text="Load Bot", command=self.load_bot, width=12, relief=tk.RAISED, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=5)
-            tk.Button(top_frame, text="New Tab", command=self.new_tab, width=12, relief=tk.RAISED, bg="#2196F3", fg="white").pack(side=tk.LEFT, padx=5)
-            tk.Button(top_frame, text="Close Tab", command=self.close_tab, width=12, relief=tk.RAISED, bg="#f44336", fg="white").pack(side=tk.LEFT, padx=5)
             tk.Button(top_frame, text="Reset State", command=self.reset_state, width=12, relief=tk.RAISED, bg="#FFC107", fg="black").pack(side=tk.LEFT, padx=5)
             
             self.status_label = tk.Label(top_frame, text="No bot loaded", font=("Arial", 10), bg="#f0f0f0", fg="#666")
@@ -419,39 +433,49 @@ class SimpleBotTesterGUI:
             content_frame = tk.Frame(self.root, bg="white")
             content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             
-            # Notebook for tabs
-            self.notebook = ttk.Notebook(content_frame)
-            self.notebook.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 10))
+            # ===== TOP: CONTROLS PANEL =====
+            controls_frame = tk.Frame(content_frame, bg="white")
+            controls_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(controls_frame, text="User Role:", font=("Arial", 9), bg="white").pack(side=tk.LEFT, padx=(0, 5))
+            self.role_var = tk.StringVar(value="admin")
+            tk.OptionMenu(controls_frame, self.role_var, "admin", "user", "system", command=self._on_role_changed).pack(side=tk.LEFT, padx=(0, 20))
+            
+            tk.Label(controls_frame, text="Error Scenario:", font=("Arial", 9), bg="white").pack(side=tk.LEFT, padx=(0, 5))
+            self.error_var = tk.StringVar(value="None")
+            tk.OptionMenu(controls_frame, self.error_var, "None", "409 Conflict", "404 Not Found", "503 Unavailable", "429 Rate Limited", command=self._on_error_changed).pack(side=tk.LEFT)
+            
+            # ===== MAIN CONTENT: Resizable paned window with Chat (LEFT) and Terminal (RIGHT) =====
+            main_frame = tk.PanedWindow(content_frame, orient=tk.HORIZONTAL, bg="white", sashwidth=5)
+            main_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+            
+            # LEFT SIDE: Notebook with tabs and chat content
+            left_container = tk.Frame(main_frame, bg="white")
+            main_frame.add(left_container, width=500)  # Initial width for left pane
+            
+            # Tabs bar and content
+            self.notebook = ttk.Notebook(left_container)
+            self.notebook.pack(fill=tk.BOTH, expand=True)
             self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+            
+            # + New Tab button
+            plus_button = tk.Button(left_container, text="+ ", command=self.new_tab, relief=tk.FLAT, bg="#2196F3", fg="white", font=("Arial", 12, "bold"), width=3)
+            plus_button.pack(anchor=tk.NE, padx=5, pady=2)
             
             # Create first tab
             self.new_tab()
             
-            # Input frame
-            input_label = tk.Label(content_frame, text="Send Message:", font=("Arial", 11, "bold"), bg="white", fg="#333")
-            input_label.pack(anchor=tk.W)
+            # RIGHT SIDE: Terminal Area (fixed width pane)
+            terminal_container = tk.Frame(main_frame, bg="white")
+            main_frame.add(terminal_container, width=500)  # Initial width for right pane
             
-            input_frame = tk.Frame(content_frame, bg="white")
-            input_frame.pack(fill=tk.X, pady=(5, 0))
-            
-            self.input_field = tk.Entry(input_frame, font=("Arial", 10), relief=tk.SUNKEN, bd=1)
-            self.input_field.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-            self.input_field.bind("<Return>", lambda e: self.send_message())
-            
-            tk.Button(input_frame, text="Send", command=self.send_message, width=10, relief=tk.RAISED, bg="#2196F3", fg="white").pack(side=tk.LEFT)
-            
-            # Terminal/Console output section
-            terminal_label = tk.Label(content_frame, text="Console Output:", font=("Arial", 11, "bold"), bg="white", fg="#333")
-            terminal_label.pack(anchor=tk.W, pady=(10, 5))
-            
-            terminal_frame = tk.Frame(content_frame, bg="white", height=150)
-            terminal_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
-            terminal_frame.pack_propagate(False)
+            # Terminal label
+            term_label = tk.Label(terminal_container, text="Terminal", font=("Arial", 10, "bold"), bg="white", fg="#333")
+            term_label.pack(anchor=tk.W, padx=5, pady=(5, 2))
             
             # Terminal display
             self.terminal_widget = tk.Text(
-                terminal_frame,
-                height=6,
+                terminal_container,
                 font=("Courier", 8),
                 bg="#1e1e1e",
                 fg="#00ff00",
@@ -461,13 +485,30 @@ class SimpleBotTesterGUI:
             )
             
             # Terminal scrollbar
-            term_scrollbar = tk.Scrollbar(terminal_frame, command=self.terminal_widget.yview)
+            term_scrollbar = tk.Scrollbar(terminal_container, command=self.terminal_widget.yview)
             self.terminal_widget.config(yscrollcommand=term_scrollbar.set)
             
-            self.terminal_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            term_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            self.terminal_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2), pady=2)
+            term_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=2)
             
             self.terminal_widget.config(state=tk.DISABLED)
+            
+            # ===== BOTTOM: MESSAGE INPUT =====
+            input_label = tk.Label(content_frame, text="Send Message:", font=("Arial", 11, "bold"), bg="white", fg="#333")
+            input_label.pack(anchor=tk.W, padx=10)
+            
+            input_frame = tk.Frame(content_frame, bg="white")
+            input_frame.pack(fill=tk.X, pady=(5, 10), padx=10)
+            
+            self.input_field = tk.Entry(input_frame, font=("Arial", 10), relief=tk.SUNKEN, bd=1)
+            self.input_field.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+            self.input_field.bind("<Return>", lambda e: self.send_message())
+            
+            tk.Button(input_frame, text="Send", command=self.send_message, width=10, relief=tk.RAISED, bg="#2196F3", fg="white").pack(side=tk.LEFT)
+
+            # Keyboard shortcuts
+            self.root.bind("<Control-w>", lambda e: self.close_current_tab())  # Ctrl+W to close tab
+            self.root.bind("<Control-t>", lambda e: self.new_tab())  # Ctrl+T to open new tab
 
             # Make input field focus
             self.input_field.focus()
@@ -478,38 +519,116 @@ class SimpleBotTesterGUI:
             traceback.print_exc()
     
     def _on_tab_changed(self, event):
-        """Handle tab change event."""
+        """Handle tab change event - sync UI to current tab settings."""
         try:
             selected_index = self.notebook.index("current")
             if 0 <= selected_index < len(self.tabs):
                 self.current_tab = self.tabs[selected_index]
                 bot_name = Path(self.current_tab.bot_path).name if self.current_tab.bot_path else "No bot"
                 self.status_label.config(text=f"Bot loaded: {bot_name}")
+                
+                # Sync UI controls to current tab's settings
+                self.role_var.set(self.current_tab.current_user_role)
+                error_code = self.current_tab.current_error_code
+                error_display = {None: "None", 409: "409 Conflict", 404: "404 Not Found", 503: "503 Unavailable", 429: "429 Rate Limited"}.get(error_code, "None")
+                self.error_var.set(error_display)
+                
+                # Sync terminal widget (clear and show tab's content if available)
+                if hasattr(self.current_tab, 'terminal_widget') and self.current_tab.terminal_widget:
+                    # Update the main terminal_widget to reference this tab's content
+                    print(f"[TAB SWITCH] Switched to tab with {len(self.current_tab.chat_frame.winfo_children())} messages")
+        except Exception as e:
+            print(f"[TAB ERROR] {e}")
+    
+    def _on_notebook_click(self, event):
+        """Handle clicks on notebook tabs - detect close button clicks."""
+        # Get the tab index at the click location
+        try:
+            clicked_tab = self.notebook.index(f"@{event.x},{event.y}")
+            
+            # Check if click is near the end of tab (where ✕ would be)
+            # If user clicks on rightmost 20 pixels of tab, assume it's the close button
+            tab_text = self.notebook.tab(clicked_tab, "text")
+            
+            # Middle-click or if text ends with ✕, close the tab
+            if event.num == 2 or tab_text.endswith("✕"):  # Middle mouse button or detected close area
+                if len(self.tabs) > 1:
+                    self._close_tab_by_index(clicked_tab)
         except:
-            pass
+            pass  # Click was not on a tab
     
-    def new_tab(self):
-        """Create a new bot test tab."""
-        tab = BotTestTab(self.notebook, self)
-        self.tabs.append(tab)
-        self.current_tab = tab
-        self.notebook.select(len(self.tabs) - 1)
-    
-    def close_tab(self):
-        """Close the current tab."""
+    def _close_tab_by_index(self, tab_index):
+        """Close a tab by index."""
         if len(self.tabs) <= 1:
             messagebox.showwarning("Cannot Close", "You must keep at least one tab open.")
             return
         
-        if self.current_tab:
-            tab_index = self.tabs.index(self.current_tab)
+        if 0 <= tab_index < len(self.tabs):
+            tab = self.tabs[tab_index]
             self.notebook.forget(tab_index)
             self.tabs.pop(tab_index)
+            
+            # Renumber remaining tabs
+            for i, t in enumerate(self.tabs, 1):
+                self.notebook.tab(i-1, text=f"Tab {i} ✕")
+                t.tab_number = i
+            
             # Select the previous tab or next tab
             if self.tabs:
                 new_index = min(tab_index, len(self.tabs) - 1)
                 self.current_tab = self.tabs[new_index]
                 self.notebook.select(new_index)
+    
+    def new_tab(self):
+        """Create a new bot test tab."""
+        tab = BotTestTab(self.notebook, self, tab_number=len(self.tabs) + 1)
+        self.tabs.append(tab)
+        self.current_tab = tab
+        self.notebook.select(len(self.tabs) - 1)
+        
+        # Bind click to detect close button
+        self.notebook.bind("<Button-1>", self._on_notebook_click)
+    
+    def _close_tab_by_index(self, tab_index):
+        """Close a tab by index."""
+        if len(self.tabs) <= 1:
+            messagebox.showwarning("Cannot Close", "You must keep at least one tab open.")
+            return
+        
+        if 0 <= tab_index < len(self.tabs):
+            tab = self.tabs[tab_index]
+            self.notebook.forget(tab_index)
+            self.tabs.pop(tab_index)
+            
+            # Renumber remaining tabs
+            for i, t in enumerate(self.tabs, 1):
+                self.notebook.tab(i-1, text=f"Tab {i} ✕")
+                t.tab_number = i
+            
+            # Select the previous tab or next tab
+            if self.tabs:
+                new_index = min(tab_index, len(self.tabs) - 1)
+                self.current_tab = self.tabs[new_index]
+                self.notebook.select(new_index)
+    
+    def _on_role_changed(self, value):
+        """Handle user role selection change."""
+        if self.current_tab:
+            self.current_tab.current_user_role = value
+            print(f"[ROLE CHANGED] User role set to: {value}")
+    
+    def _on_error_changed(self, value):
+        """Handle error scenario selection change."""
+        if self.current_tab:
+            error_map = {"None": None, "409 Conflict": 409, "404 Not Found": 404, "503 Unavailable": 503, "429 Rate Limited": 429}
+            self.current_tab.current_error_code = error_map.get(value, None)
+            print(f"[ERROR CHANGED] Error scenario set to: {value}")
+    
+    def close_current_tab(self):
+        """Close the current tab (keyboard shortcut or button)."""
+        if self.current_tab and self.current_tab in self.tabs:
+            tab_index = self.tabs.index(self.current_tab)
+            self._close_tab_by_index(tab_index)
     
     def load_bot(self):
         """Load a bot from a folder or file."""
@@ -531,10 +650,10 @@ class SimpleBotTesterGUI:
         def load_with_timeout():
             try:
                 # Display loading message
-                self.current_tab.display_message("[INFO] Loading bot (installing requirements)...", is_bot=True)
+                self.current_tab.display_message("[INFO] Loading bot (installing requirements + initializing addon system)...", is_bot=True)
                 
                 # Load bot in background with a timeout
-                print("[LOAD] Starting bot load with 15-second timeout...")
+                print("[LOAD] Starting bot load with 60-second timeout (addon system + dependencies)...")
                 tester = InteractiveTester(bot_path)
                 print("[LOAD] Bot loaded successfully")
                 
@@ -550,13 +669,14 @@ class SimpleBotTesterGUI:
         load_thread.start()
         
         # Wait with a timeout - if load takes too long, notify user
-        load_thread.join(timeout=15)
+        # Increased to 60 seconds to allow addon system initialization + dependency installation
+        load_thread.join(timeout=60)
         
         if load_thread.is_alive():
-            print("[LOAD] Bot load timed out after 15 seconds")
+            print("[LOAD] Bot load timed out after 60 seconds")
             self.root.after(0, self._bot_load_failed, RuntimeError(
-                "Bot module load timed out after 15 seconds. "
-                "The bot may have blocking imports or network operations at module level. "
+                "Bot module load timed out after 60 seconds. "
+                "The bot may have blocking imports, addon initialization, or network operations at module level. "
                 "Check that TESTING_MODE is properly set in the bot's environment."
             ))
     
@@ -602,7 +722,7 @@ class SimpleBotTesterGUI:
         load_thread.start()
     
     def send_message(self):
-        """Send message to bot."""
+        """Send message to bot with current role/error settings."""
         if not self.current_tab or not self.current_tab.tester:
             messagebox.showwarning("Bot Not Loaded", "Please load a bot first.")
             return
@@ -612,34 +732,49 @@ class SimpleBotTesterGUI:
             return
         
         self.input_field.delete(0, tk.END)
-        # Display user message in bubble
-        self.current_tab.display_message(f"{text}", is_bot=False)
+        
+        # Get current role and error settings
+        user_role = self.current_tab.current_user_role
+        error_code = self.current_tab.current_error_code
+        
+        # Display user message in bubble with user role
+        self.current_tab.display_message(f"{text}", is_bot=False, user_role=user_role)
         
         # Show waiting message for games (they take 45+ seconds)
         is_game_cmd = any(cmd in text.lower() for cmd in ['!planegame', '!gungame', 'game', 'hard mode', 'refresh'])
         if is_game_cmd:
             self.current_tab.display_message("[BOT] Loading game... (fetching aircraft from Wikipedia, this takes ~45 seconds)", is_bot=True)
         
+        # Show error simulation message
+        if error_code:
+            self.current_tab.display_message(f"[BOT] Simulating error: {error_code}", is_bot=True)
+        
         # Run in thread to prevent GUI freeze
         def test():
             try:
-                print(f"[TEST DEBUG] Sending message: {text}")
-                responses = self.current_tab.tester.test_message(text)
+                print(f"[TEST DEBUG] Sending message: {text} (role={user_role}, error={error_code})")
+                
+                # Use appropriate test method based on settings
+                if error_code:
+                    error_map = {409: "Conflict", 404: "Not Found", 503: "Service Unavailable", 429: "Too Many Requests"}
+                    responses = self.current_tab.tester.test_message_error(text, error_code=error_code, error_msg=error_map.get(error_code, "Error"))
+                else:
+                    responses = self.current_tab.tester.test_message(text, user_role=user_role)
+                
                 print(f"[TEST DEBUG] test_message() returned {len(responses)} responses")
-                print(f"[TEST DEBUG] message_responses has {len(self.current_tab.tester.message_responses)} items")
                 
                 # Get active skin PFP for display
                 bot_pfp = self.current_tab.tester.get_active_skin_pfp()
                 
-                # Display messages with their attachments from message_responses
-                if self.current_tab.tester.message_responses:
-                    print(f"[TEST DEBUG] Processing {len(self.current_tab.tester.message_responses)} messages")
+                # Display messages with their attachments from returned responses
+                if responses:
+                    print(f"[TEST DEBUG] Processing {len(responses)} messages")
                     print(f"[TEST DEBUG] Bot PFP: {bot_pfp}")
                     
                     # Display PFP with header only once, before first message
                     pfp_displayed = False
                     
-                    for i, msg_resp in enumerate(self.current_tab.tester.message_responses, 1):
+                    for i, msg_resp in enumerate(responses, 1):
                         print(f"[TEST DEBUG] Message {i}: type={type(msg_resp)}, keys={list(msg_resp.keys()) if isinstance(msg_resp, dict) else 'N/A'}")
                         if isinstance(msg_resp, dict):
                             msg_text = msg_resp.get('text', '')
@@ -714,7 +849,7 @@ class SimpleBotTesterGUI:
                         divider_label = tk.Label(divider_frame, text="-" * 25, font=("Arial", 8), bg="#ffffff", fg="#888")
                         divider_label.pack()
                 else:
-                    print(f"[TEST DEBUG] message_responses is empty!")
+                    print(f"[TEST DEBUG] No responses returned!")
                     self.current_tab.display_message("(no response)", is_bot=True)
                 print(f"[TEST DEBUG] Finished displaying all messages")
             except Exception as e:
