@@ -1,0 +1,9 @@
+# Example test messages for batch testing
+# One message per line
+# Use with: python src/cli_tester.py --bot . --batch examples/test_messages_basic.txt
+
+!help
+!status
+!ping
+hello
+test

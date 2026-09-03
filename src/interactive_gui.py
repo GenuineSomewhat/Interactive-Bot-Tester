@@ -91,6 +91,7 @@ class BotTestTab:
         # Test settings for this tab
         self.current_user_role = "admin"  # admin or user
         self.current_error_code = None  # 409, 404, 503, etc
+        self.attached_image_path = None  # Path to attached image/patch file
         
         # Create tab frame (for notebook)
         self.frame = ttk.Frame(notebook)
@@ -505,6 +506,11 @@ class SimpleBotTesterGUI:
             self.input_field.bind("<Return>", lambda e: self.send_message())
             
             tk.Button(input_frame, text="Send", command=self.send_message, width=10, relief=tk.RAISED, bg="#2196F3", fg="white").pack(side=tk.LEFT)
+            tk.Button(input_frame, text="📎 Attach", command=self.attach_image, width=10, relief=tk.RAISED, bg="#FF9800", fg="white").pack(side=tk.LEFT, padx=2)
+            
+            # Attachment status label
+            self.attachment_label = tk.Label(content_frame, text="", font=("Arial", 9), bg="white", fg="#666")
+            self.attachment_label.pack(anchor=tk.W, padx=10)
 
             # Keyboard shortcuts
             self.root.bind("<Control-w>", lambda e: self.close_current_tab())  # Ctrl+W to close tab
@@ -754,10 +760,24 @@ class SimpleBotTesterGUI:
             try:
                 print(f"[TEST DEBUG] Sending message: {text} (role={user_role}, error={error_code})")
                 
+                # Handle attachments
+                attachments = []
+                if self.current_tab.attached_image_path:
+                    image_path = self.current_tab.attached_image_path
+                    # Create attachment dict - use mock URL with file path for testing
+                    attachments = [{
+                        "type": "image",
+                        "url": f"mock://{image_path}",
+                        "is_local_file": True
+                    }]
+                    print(f"[TEST DEBUG] Attached image: {image_path}")
+                
                 # Use appropriate test method based on settings
                 if error_code:
                     error_map = {409: "Conflict", 404: "Not Found", 503: "Service Unavailable", 429: "Too Many Requests"}
                     responses = self.current_tab.tester.test_message_error(text, error_code=error_code, error_msg=error_map.get(error_code, "Error"))
+                elif attachments:
+                    responses = self.current_tab.tester.test_message_with_attachments(text, attachments, user_role=user_role)
                 else:
                     responses = self.current_tab.tester.test_message(text, user_role=user_role)
                 
@@ -852,6 +872,10 @@ class SimpleBotTesterGUI:
                     print(f"[TEST DEBUG] No responses returned!")
                     self.current_tab.display_message("(no response)", is_bot=True)
                 print(f"[TEST DEBUG] Finished displaying all messages")
+                
+                # Auto-clear attachment after successful send
+                if self.current_tab.attached_image_path:
+                    self.clear_attachment()
             except Exception as e:
                 print(f"[TEST ERROR] {e}")
                 import traceback
@@ -860,6 +884,35 @@ class SimpleBotTesterGUI:
         
         thread = Thread(target=test, daemon=True)
         thread.start()
+    
+    def attach_image(self):
+        """Open file dialog to select an image/patch to attach."""
+        if not self.current_tab:
+            messagebox.showwarning("No Tab", "Please load a bot first.")
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Select Image or Patch",
+            filetypes=[
+                ("Image Files", "*.png *.jpg *.jpeg *.gif"),
+                ("Patch Files", "*.patch.png"),
+                ("All Files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.current_tab.attached_image_path = file_path
+            # Display attachment status
+            filename = Path(file_path).name
+            self.attachment_label.config(text=f"📎 Attached: {filename}", fg="#FF9800")
+            print(f"[ATTACHMENT] Selected: {file_path}")
+    
+    def clear_attachment(self):
+        """Clear the attached image."""
+        if self.current_tab:
+            self.current_tab.attached_image_path = None
+            self.attachment_label.config(text="", fg="#666")
+            print("[ATTACHMENT] Cleared")
     
     def display_image(self, image_path, is_local_file=False, show_name=False):
         """Display an image from file path or URL."""

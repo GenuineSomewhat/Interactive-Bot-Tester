@@ -927,9 +927,9 @@ class InteractiveTester:
         if att_type == "image":
             if "url" not in attachment:
                 raise ValueError("Image attachment must have 'url'")
-            # Validate URL format (should be i.groupme.com)
-            if not attachment["url"].startswith(('http://', 'https://')):
-                raise ValueError("Image URL must be absolute URL")
+            # Validate URL format (should be i.groupme.com or mock:// for testing)
+            if not attachment["url"].startswith(('http://', 'https://', 'mock://', 'file://')):
+                raise ValueError("Image URL must be absolute URL (http://, https://, mock://, or file://)")
             return True
         
         elif att_type == "location":
