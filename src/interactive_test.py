@@ -1325,16 +1325,58 @@ class InteractiveTester:
         
         try:
             response = client.post(self.webhook_route, json=event, headers=headers)
-            
-            # Wait for background threads
-            # In TESTING_MODE, game initialization is skipped so only need short wait for REPLY
-            # In production, would need much longer (45s) to fetch from Wikipedia
-            if any(game_cmd in text.lower() for game_cmd in ['!planegame', '!gungame', 'game', 'hard mode', 'refresh']):
-                wait_time = 1.0  # TESTING_MODE skips real initialization
-            else:
-                wait_time = 0.5  # Regular commands are faster
-            
-            time.sleep(wait_time)
+
+            # Wait for async replies until the stream goes idle (or timeout).
+            # This is important for commands that spawn worker threads (e.g. game modes).
+            lowered = text.lower().strip()
+            normalized = " ".join(lowered.split())
+            is_async_game_cmd = (
+                normalized.startswith('!refreshplanegame')
+                or normalized.startswith('!refreshgungame')
+                or normalized.startswith('!gungame')
+                or (normalized.startswith('!planegame') and not normalized.startswith('!planegame categories'))
+            )
+
+            max_wait = 90.0 if is_async_game_cmd else 3.0
+            min_wait = 1.0 if is_async_game_cmd else 0.2
+            idle_window = 0.35 if not is_async_game_cmd else 1.2
+
+            def _has_async_game_completion() -> bool:
+                for item in local_responses:
+                    if not isinstance(item, dict):
+                        continue
+                    msg = str(item.get("text", "") or "").lower()
+                    if (
+                        "plane game started!" in msg
+                        or "plane game restarted!" in msg
+                        or "gun game started!" in msg
+                        or "gun game restarted!" in msg
+                        or "couldn't start plane game" in msg
+                        or "couldn't start gun game" in msg
+                        or "game error:" in msg
+                        or "error starting gun game" in msg
+                    ):
+                        return True
+                return False
+
+            start_wait = time.time()
+            last_count = len(local_responses)
+            last_change = start_wait
+
+            while (time.time() - start_wait) < max_wait:
+                time.sleep(0.1)
+                current_count = len(local_responses)
+                if current_count != last_count:
+                    last_count = current_count
+                    last_change = time.time()
+
+                elapsed = time.time() - start_wait
+                idle_elapsed = time.time() - last_change
+                if is_async_game_cmd and _has_async_game_completion():
+                    break
+
+                if (not is_async_game_cmd) and elapsed >= min_wait and idle_elapsed >= idle_window:
+                    break
         except Exception as e:
             print(f"[ERROR] Webhook post failed: {e}")
         
