@@ -15,6 +15,7 @@ import urllib.request
 import urllib.error
 import subprocess
 import time
+import re
 
 sys.path.insert(0, str(Path(__file__).parent))
 from interactive_test import InteractiveTester
@@ -92,6 +93,8 @@ class BotTestTab:
         self.current_user_role = "admin"  # admin or user
         self.current_error_code = None  # 409, 404, 503, etc
         self.attached_image_path = None  # Path to attached image/patch file
+        self.current_viewer_mode = "admin"  # admin, user, system, custom
+        self.current_viewer_user_id = "admin_test_123"
         
         # Create tab frame (for notebook)
         self.frame = ttk.Frame(notebook)
@@ -167,7 +170,7 @@ class BotTestTab:
         
         return ImageTk.PhotoImage(img)
     
-    def _create_message_bubble(self, text, is_bot=True, pfp_widget=None, user_role=None):
+    def _create_message_bubble(self, text, is_bot=True, pfp_widget=None, user_role=None, mention_hit=False):
         """Create a styled message bubble widget."""
         # Check if this is a system message
         is_system = text.strip().startswith('[') and any(tag in text for tag in ['[INFO]', '[SUCCESS]', '[ERROR]', '[BOT]'])
@@ -219,6 +222,19 @@ class BotTestTab:
             # Regular message - left or right aligned
             bubble_frame = tk.Frame(self.chat_frame, bg="#ffffff")
             bubble_frame.pack(fill=tk.X, padx=10, pady=5)
+
+            # Mention notification banner for bot messages that mention the active viewer
+            if mention_hit and is_bot:
+                mention_label = tk.Label(
+                    bubble_frame,
+                    text="YOU WERE MENTIONED",
+                    font=("Arial", 8, "bold"),
+                    bg="#fff3cd",
+                    fg="#7a5600",
+                    padx=8,
+                    pady=2
+                )
+                mention_label.pack(anchor=tk.W, padx=(50, 0), pady=(0, 3))
             
             # Display user name/role above message if not bot
             if not is_bot and user_role:
@@ -232,7 +248,8 @@ class BotTestTab:
             
             # Inner bubble with colored background
             if is_bot:
-                bubble_bg = (232, 232, 232)  # Light gray for bot
+                # Tint bot bubble when the active viewer is mentioned.
+                bubble_bg = (255, 243, 205) if mention_hit else (232, 232, 232)
                 text_color = (0, 0, 0)  # Black
             else:
                 bubble_bg = (0, 122, 255)  # Blue for user
@@ -321,7 +338,7 @@ class BotTestTab:
             title = f"Tab {self.tab_number}"
         self.notebook.tab(self.tab_index, text=f"{title} ✕")
     
-    def display_message(self, text, is_bot=True, user_role=None):
+    def display_message(self, text, is_bot=True, user_role=None, mention_hit=False):
         """Add text to chat display as a styled bubble. Thread-safe via root.after()."""
         try:
             if not hasattr(self, 'chat_frame') or not self.chat_frame:
@@ -337,7 +354,7 @@ class BotTestTab:
             def update_gui():
                 try:
                     # Create bubble on main thread
-                    self._create_message_bubble(text, is_bot=is_bot, user_role=user_role)
+                    self._create_message_bubble(text, is_bot=is_bot, user_role=user_role, mention_hit=mention_hit)
                     
                     # Scroll to bottom
                     self.chat_canvas.yview_moveto(1.0)
@@ -351,6 +368,12 @@ class BotTestTab:
 
 
 class SimpleBotTesterGUI:
+    TEST_USER_IDS = {
+        "admin": "admin_test_123",
+        "user": "user_test_456",
+        "system": "system"
+    }
+
     def __init__(self, root, initial_bot_path=None):
         self.root = root
         self.root.title("Interactive Bot Tester")
@@ -445,6 +468,15 @@ class SimpleBotTesterGUI:
             tk.Label(controls_frame, text="Error Scenario:", font=("Arial", 9), bg="white").pack(side=tk.LEFT, padx=(0, 5))
             self.error_var = tk.StringVar(value="None")
             tk.OptionMenu(controls_frame, self.error_var, "None", "409 Conflict", "404 Not Found", "503 Unavailable", "429 Rate Limited", command=self._on_error_changed).pack(side=tk.LEFT)
+
+            tk.Label(controls_frame, text="View As:", font=("Arial", 9), bg="white").pack(side=tk.LEFT, padx=(20, 5))
+            self.viewer_var = tk.StringVar(value="admin")
+            tk.OptionMenu(controls_frame, self.viewer_var, "admin", "user", "system", "custom", command=self._on_viewer_changed).pack(side=tk.LEFT, padx=(0, 5))
+
+            self.viewer_user_id_var = tk.StringVar(value=self.TEST_USER_IDS["admin"])
+            self.viewer_user_id_entry = tk.Entry(controls_frame, textvariable=self.viewer_user_id_var, width=18, font=("Arial", 9), relief=tk.SUNKEN, bd=1)
+            self.viewer_user_id_entry.pack(side=tk.LEFT)
+            self.viewer_user_id_entry.bind("<KeyRelease>", self._on_viewer_user_id_changed)
             
             # ===== MAIN CONTENT: Resizable paned window with Chat (LEFT) and Terminal (RIGHT) =====
             main_frame = tk.PanedWindow(content_frame, orient=tk.HORIZONTAL, bg="white", sashwidth=5)
@@ -538,6 +570,8 @@ class SimpleBotTesterGUI:
                 error_code = self.current_tab.current_error_code
                 error_display = {None: "None", 409: "409 Conflict", 404: "404 Not Found", 503: "503 Unavailable", 429: "429 Rate Limited"}.get(error_code, "None")
                 self.error_var.set(error_display)
+                self.viewer_var.set(self.current_tab.current_viewer_mode)
+                self.viewer_user_id_var.set(self.current_tab.current_viewer_user_id)
                 
                 # Sync terminal widget (clear and show tab's content if available)
                 if hasattr(self.current_tab, 'terminal_widget') and self.current_tab.terminal_widget:
@@ -629,6 +663,74 @@ class SimpleBotTesterGUI:
             error_map = {"None": None, "409 Conflict": 409, "404 Not Found": 404, "503 Unavailable": 503, "429 Rate Limited": 429}
             self.current_tab.current_error_code = error_map.get(value, None)
             print(f"[ERROR CHANGED] Error scenario set to: {value}")
+
+    def _on_viewer_changed(self, value):
+        """Handle mention viewer selection change."""
+        if self.current_tab:
+            self.current_tab.current_viewer_mode = value
+            if value != "custom":
+                mapped_user_id = self.TEST_USER_IDS.get(value, "")
+                self.current_tab.current_viewer_user_id = mapped_user_id
+                self.viewer_user_id_var.set(mapped_user_id)
+            print(f"[VIEWER CHANGED] Mention viewer set to: {value} ({self.current_tab.current_viewer_user_id})")
+
+    def _on_viewer_user_id_changed(self, _event=None):
+        """Persist custom viewer user id per tab."""
+        if self.current_tab:
+            self.current_tab.current_viewer_user_id = self.viewer_user_id_var.get().strip()
+            if self.current_tab.current_viewer_mode != "custom":
+                self.current_tab.current_viewer_mode = "custom"
+                self.viewer_var.set("custom")
+
+    def _resolve_viewer_user_id(self):
+        """Resolve effective viewer user id for mention matching."""
+        if not self.current_tab:
+            return ""
+
+        mode = self.current_tab.current_viewer_mode
+        if mode == "custom":
+            return (self.current_tab.current_viewer_user_id or "").strip()
+
+        return self.TEST_USER_IDS.get(mode, (self.current_tab.current_viewer_user_id or "").strip())
+
+    def _is_viewer_mentioned(self, attachments):
+        """Return True if mentions attachment targets the active viewer id."""
+        viewer_user_id = self._resolve_viewer_user_id()
+        if not viewer_user_id:
+            return False
+
+        viewer_user_id = str(viewer_user_id)
+        for attachment in attachments or []:
+            if attachment.get("type") != "mentions":
+                continue
+            user_ids = [str(uid) for uid in attachment.get("user_ids", [])]
+            if viewer_user_id in user_ids:
+                return True
+        return False
+
+    def _format_bot_message_text(self, msg_text, attachments):
+        """Render mention-anchor text in a user-friendly way for the tester UI."""
+        if not msg_text:
+            return msg_text
+
+        mention_count = 0
+        for attachment in attachments or []:
+            if attachment.get("type") == "mentions":
+                mention_count = max(mention_count, len(attachment.get("user_ids", [])))
+
+        if mention_count <= 0:
+            return msg_text
+
+        stripped = msg_text.strip()
+
+        # GroupMe mention payloads can contain placeholder markers such as "@ @" or "@@@".
+        # In the tester, show a friendlier label instead of raw anchors.
+        if stripped and re.fullmatch(r"[@\s]+", stripped):
+            if mention_count == 1:
+                return "mentioning someone..."
+            return f"mentioning {mention_count} people..."
+
+        return msg_text
     
     def close_current_tab(self):
         """Close the current tab (keyboard shortcut or button)."""
@@ -798,6 +900,9 @@ class SimpleBotTesterGUI:
                         print(f"[TEST DEBUG] Message {i}: type={type(msg_resp)}, keys={list(msg_resp.keys()) if isinstance(msg_resp, dict) else 'N/A'}")
                         if isinstance(msg_resp, dict):
                             msg_text = msg_resp.get('text', '')
+                            attachments = msg_resp.get('attachments', [])
+                            mention_hit = self._is_viewer_mentioned(attachments)
+                            display_text = self._format_bot_message_text(msg_text, attachments)
                             
                             # Create bot message bubble with PFP header on first message
                             if not pfp_displayed and bot_pfp is not None:
@@ -837,14 +942,18 @@ class SimpleBotTesterGUI:
                                 pfp_displayed = True
                             
                             # Display text content in bubble
-                            if msg_text:
+                            if display_text:
                                 print(f"[TEST DEBUG] Displaying text for message {i}")
-                                self.current_tab.display_message(f"{msg_text}", is_bot=True)
+                                self.current_tab.display_message(f"{display_text}", is_bot=True, mention_hit=mention_hit)
+
+                            if mention_hit:
+                                self.current_tab.display_message("[INFO] Mention alert: this message includes your user ID.", is_bot=True)
+                                self.root.after(0, self.root.bell)
                             
                             # Display image if present (from attachments)
-                            if 'attachments' in msg_resp and msg_resp['attachments']:
-                                print(f"[TEST DEBUG] Message {i} has {len(msg_resp['attachments'])} attachments")
-                                for att_idx, attachment in enumerate(msg_resp['attachments']):
+                            if attachments:
+                                print(f"[TEST DEBUG] Message {i} has {len(attachments)} attachments")
+                                for att_idx, attachment in enumerate(attachments):
                                     att_type = attachment.get('type', 'unknown')
                                     print(f"[TEST DEBUG] Attachment {att_idx}: type={att_type}")
                                     if att_type == 'image' and attachment.get('url'):
@@ -856,6 +965,15 @@ class SimpleBotTesterGUI:
                                         duration = attachment.get('duration', 7)
                                         print(f"[TEST DEBUG] Calling display_audio for: {attachment['url'][:60]}...")
                                         self.display_audio(attachment['url'], is_local_file=is_local, duration=duration)
+                                    elif att_type == 'mentions':
+                                        user_ids = attachment.get('user_ids', [])
+                                        viewer_id = self._resolve_viewer_user_id() or "(unset)"
+                                        mention_status = "(you were mentioned)" if mention_hit else "(not for your viewer id)"
+                                        print(f"[TEST DEBUG] Displaying mentions: {user_ids} / viewer={viewer_id}")
+                                        self.current_tab.display_message(
+                                            f"\U0001F4CC Mentions ({len(user_ids)}): {', '.join(str(u) for u in user_ids)} | viewer={viewer_id} {mention_status}",
+                                            is_bot=True
+                                        )
                             else:
                                 print(f"[TEST DEBUG] Message {i} has no attachments")
                         else:

@@ -628,8 +628,18 @@ class InteractiveTester:
             try:
                 tester.sent_messages.append(msg_text)
                 response = {"text": msg_text}
+                attachments = []
                 if 'image_url' in kwargs:
-                    response["attachments"] = [{"type": "image", "url": kwargs['image_url']}]
+                    attachments.append({"type": "image", "url": kwargs['image_url']})
+                mentions = kwargs.get('mentions')
+                if mentions:
+                    attachments.append({
+                        "type": "mentions",
+                        "loci": mentions.get("loci", []),
+                        "user_ids": mentions.get("user_ids", []),
+                    })
+                if attachments:
+                    response["attachments"] = attachments
                 tester.message_responses.append(response)
                 return True  # Return True to indicate success
             except Exception as e:
@@ -678,14 +688,23 @@ class InteractiveTester:
             """Intercept GroupMe API calls (as fallback if they somehow get through)."""
             # Intercept GroupMe bot message sends
             if "api.groupme.com/v3/bots/post" in url:
+                payload = kwargs.get('json') or {}
+                msg_text = payload.get('text', '') or ''
+
                 # Capture startup message if it hasn't been captured yet
-                if kwargs.get('json') and kwargs['json'].get('text'):
-                    msg_text = kwargs['json']['text']
-                    # Check if this looks like a startup message (not from user input)
-                    if not tester.sent_messages and tester.startup_message is None:
-                        # This is likely the startup message sent during initialization
-                        tester.startup_message = msg_text
-                
+                if msg_text and not tester.sent_messages and tester.startup_message is None:
+                    # This is likely the startup message sent during initialization
+                    tester.startup_message = msg_text
+
+                # Also surface it in the GUI like any other bot message (covers addon
+                # push()/raw API calls that bypass send_message entirely).
+                tester.sent_messages.append(msg_text)
+                response = {"text": msg_text}
+                raw_attachments = payload.get('attachments') or []
+                if raw_attachments:
+                    response["attachments"] = raw_attachments
+                tester.message_responses.append(response)
+
                 class FakeResponse:
                     status_code = 202
                     text = '{"response": {}}'
@@ -727,7 +746,22 @@ class InteractiveTester:
             print(f"[PATCH DEBUG] send_message_with_image NOT FOUND in {self.bot_module.__name__}")
         
         if hasattr(self.bot_module, 'send_message_with_ping'):
-            self.bot_module.send_message_with_ping = lambda msg_text, name=None, user_id=None, **kw: capture_message(msg_text, **kw)
+            real_build_mention = getattr(self.bot_module, 'build_mention', None)
+
+            def capture_ping_message(msg_text, name=None, user_id=None, **kw):
+                """Compute a real mention (via the bot's own build_mention) so pings are visible in the GUI."""
+                mentions = None
+                if real_build_mention and name and user_id:
+                    try:
+                        result = real_build_mention(msg_text, name, str(user_id))
+                        if result:
+                            loci_entry, uid = result
+                            mentions = {"loci": [loci_entry], "user_ids": [uid]}
+                    except Exception as e:
+                        print(f"[CAPTURE ERROR] build_mention failed: {e}")
+                return capture_message(msg_text, mentions=mentions, **kw)
+
+            self.bot_module.send_message_with_ping = capture_ping_message
         
         # IMPORTANT: Also patch addon system's send callbacks
         # The addon system has already captured references, so we need to update those
@@ -770,6 +804,9 @@ class InteractiveTester:
                 
                 Addon.handle_message = handle_message_wrapper
                 print("[PATCH DEBUG] Patched Addon.handle_message() method")
+        except ModuleNotFoundError:
+            # Expected for bots without the translator-based "addons" package (e.g. clankerguy_addons-style bots)
+            print("[DEBUG] No translator-based addon package found; skipping addon context patch")
         except Exception as e:
             print(f"[DEBUG] Could not patch addon context: {e}")
             import traceback
