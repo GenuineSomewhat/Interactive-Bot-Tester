@@ -10,8 +10,11 @@ import time
 import threading
 import uuid
 import hashlib
+import tempfile
+import mimetypes
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from typing import Dict
 
 # Setup logging - only use file handler when frozen to avoid GUI conflicts
 import logging
@@ -503,6 +506,9 @@ class InteractiveTester:
         self.app = None
         self.sent_messages = []
         self.message_responses = []
+        self.bot_display_name = "ClankBot"
+        self.bot_display_pfp = None
+        self._uploaded_image_url_to_local_path = {}
         self.startup_message = None  # Capture startup message from bot
         self.webhook_route = "/"
         self._message_id_counter = 1000000  # Start with realistic numeric IDs
@@ -519,6 +525,29 @@ class InteractiveTester:
         print("[TESTER INIT] About to call _load_bot()")
         self._load_bot()
         print("[TESTER INIT] _load_bot() completed successfully")
+
+    def _parse_simple_yaml_map(self, yaml_path: str) -> Dict[str, str]:
+        values: Dict[str, str] = {}
+        if not yaml_path or not os.path.exists(yaml_path):
+            return values
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.split("#", 1)[0].strip()
+                    if not line or ":" not in line:
+                        continue
+                    key, value = line.split(":", 1)
+                    values[key.strip()] = value.strip().strip("\"'")
+        except Exception as exc:
+            print(f"[TESTER WARN] Could not parse {yaml_path}: {exc}")
+        return values
+
+    def _resolve_initial_bot_display_name(self) -> str:
+        info = self._parse_simple_yaml_map(os.path.join(self.bot_dir, "botinfo.yaml"))
+        candidate = info.get("botname") or info.get("name")
+        if candidate:
+            return str(candidate).strip()
+        return Path(self.bot_dir).name or "ClankBot"
 
     
     def _load_bot(self):
@@ -546,6 +575,7 @@ class InteractiveTester:
         self.bot_module, self.app = load_bot_module(self.bot_path)
         print("[TESTER _LOAD_BOT] load_bot_module() completed!")
         _logger.info("load_bot_module() completed")
+        self.bot_display_name = self._resolve_initial_bot_display_name()
         
         # Detect webhook route
         print("[TESTER _LOAD_BOT] Detecting webhook route")
@@ -622,6 +652,7 @@ class InteractiveTester:
         import requests
         tester = self  # Closure capture
         original_post = requests.post  # Save original for non-GroupMe calls
+        original_get = requests.get   # Save original for non-local URL fetches
         
         def capture_message(msg_text, **kwargs):
             """Capture text messages."""
@@ -713,6 +744,20 @@ class InteractiveTester:
                     def raise_for_status(self):
                         pass
                 return FakeResponse()
+
+            # Intercept GroupMe bot profile update endpoint (used by set_bot_name/set_bot_avatar).
+            if "api.groupme.com/v3/bots/" in url:
+                class FakeBotUpdateResponse:
+                    status_code = 200
+                    text = '{"response": {}}'
+
+                    def json(self):
+                        return {"response": {}}
+
+                    def raise_for_status(self):
+                        return None
+
+                return FakeBotUpdateResponse()
             
             # Intercept GroupMe image uploads - return dummy success
             if "image.groupme.com/pictures" in url:
@@ -727,11 +772,92 @@ class InteractiveTester:
             
             # For all other requests, use the original
             return original_post(url, *args, **kwargs)
+
+        def fake_requests_get(url, *args, **kwargs):
+            """Intercept local/mock image fetches so !botpfp can read tester attachments."""
+            try:
+                candidate = str(url or "")
+
+                local_path = None
+                if candidate.startswith("mock://"):
+                    local_path = candidate[len("mock://"):]
+                elif candidate.startswith("file://"):
+                    local_path = candidate[len("file://"):]
+                elif os.path.isabs(candidate) and os.path.isfile(candidate):
+                    local_path = candidate
+
+                if local_path:
+                    if os.path.isfile(local_path):
+                        with open(local_path, "rb") as f:
+                            payload = f.read()
+                        guessed_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
+
+                        class FakeLocalGetResponse:
+                            status_code = 200
+                            headers = {"Content-Type": guessed_type}
+                            content = payload
+                            text = ""
+
+                            def raise_for_status(self):
+                                return None
+
+                            def json(self):
+                                return {}
+
+                        return FakeLocalGetResponse()
+
+                    class FakeMissingLocalGetResponse:
+                        status_code = 404
+                        headers = {"Content-Type": "text/plain"}
+                        content = b""
+                        text = "local file not found"
+
+                        def raise_for_status(self):
+                            raise RuntimeError("Local file not found")
+
+                        def json(self):
+                            return {}
+
+                    return FakeMissingLocalGetResponse()
+            except Exception as e:
+                print(f"[PATCH DEBUG] fake_requests_get fallback due to error: {e}")
+
+            return original_get(url, *args, **kwargs)
         
         def fake_upload_image_to_groupme(image_bytes, content_type="image/jpeg"):
             """Fake image upload - return dummy URL for testing."""
-            # In test mode, just return a dummy URL without actually uploading
-            return "https://i.groupme.com/test.jpg"
+            # In test mode, create a local preview file and return a fake hosted URL.
+            ext_map = {
+                "image/jpeg": ".jpg",
+                "image/jpg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+            }
+            normalized_type = str(content_type or "image/jpeg").split(";", 1)[0].strip().lower()
+            ext = ext_map.get(normalized_type, ".jpg")
+
+            cache_dir = os.path.join(self.bot_dir, "storage", "tester_pfp_cache")
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                local_path = os.path.join(cache_dir, f"pfp_{uuid.uuid4().hex}{ext}")
+                with open(local_path, "wb") as f:
+                    f.write(image_bytes or b"")
+            except Exception:
+                # Fall back to system temp if bot storage path cannot be used.
+                fd, local_path = tempfile.mkstemp(suffix=ext)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(image_bytes or b"")
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+
+            hosted_url = f"https://i.groupme.com/test_{uuid.uuid4().hex}{ext}"
+            self._uploaded_image_url_to_local_path[hosted_url] = local_path
+            return hosted_url
         
         # Patch send functions - these intercept BEFORE any GroupMe processing
         if hasattr(self.bot_module, 'send_message'):
@@ -936,10 +1062,60 @@ class InteractiveTester:
         
         # Patch requests.post as fallback (shouldn't be needed since we intercept earlier)
         requests.post = fake_requests_post
+        requests.get = fake_requests_get
         self.bot_module.requests.post = fake_requests_post
+        self.bot_module.requests.get = fake_requests_get
         
         # Patch admin checks to allow testing
         self._patch_admin_checks()
+
+        # Patch bot name changes so GUI can reflect !botname/!resetname immediately.
+        if hasattr(self.bot_module, 'set_bot_name') and callable(self.bot_module.set_bot_name):
+            original_set_bot_name = self.bot_module.set_bot_name
+
+            def patched_set_bot_name(new_name, *args, **kwargs):
+                result = original_set_bot_name(new_name, *args, **kwargs)
+                try:
+                    success = bool(result[0]) if isinstance(result, tuple) else bool(result)
+                    resolved_name = ""
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        resolved_name = str(result[1] or "").strip()
+                    if not resolved_name:
+                        resolved_name = str(new_name or "").strip()
+                    if success and resolved_name:
+                        tester.bot_display_name = resolved_name
+                        print(f"[PATCH DEBUG] Updated tester bot_display_name -> {tester.bot_display_name}")
+                except Exception as exc:
+                    print(f"[PATCH DEBUG] Failed to sync bot display name: {exc}")
+                return result
+
+            self.bot_module.set_bot_name = patched_set_bot_name
+            print("[PATCH DEBUG] Patched set_bot_name for live GUI name updates")
+
+        # Patch bot avatar changes so GUI can reflect !botpfp/!resetpfp immediately.
+        if hasattr(self.bot_module, 'set_bot_avatar') and callable(self.bot_module.set_bot_avatar):
+            original_set_bot_avatar = self.bot_module.set_bot_avatar
+
+            def patched_set_bot_avatar(image_url, *args, **kwargs):
+                result = original_set_bot_avatar(image_url, *args, **kwargs)
+                try:
+                    success = bool(result[0]) if isinstance(result, tuple) else bool(result)
+                    if success:
+                        candidate = str(image_url or "").strip()
+                        resolved_local = self._uploaded_image_url_to_local_path.get(candidate)
+                        if not resolved_local and candidate.startswith("mock://"):
+                            resolved_local = candidate[len("mock://"):]
+                        if not resolved_local and os.path.isfile(candidate):
+                            resolved_local = candidate
+                        if resolved_local and os.path.isfile(resolved_local):
+                            tester.bot_display_pfp = resolved_local
+                            print(f"[PATCH DEBUG] Updated tester bot_display_pfp -> {resolved_local}")
+                except Exception as exc:
+                    print(f"[PATCH DEBUG] Failed to sync bot avatar: {exc}")
+                return result
+
+            self.bot_module.set_bot_avatar = patched_set_bot_avatar
+            print("[PATCH DEBUG] Patched set_bot_avatar for live GUI pfp updates")
     
     def _generate_source_guid(self):
         """Generate unique source_guid for de-duplication (like real GroupMe)."""
@@ -1243,7 +1419,28 @@ class InteractiveTester:
             # Include realistic headers
             headers = self.build_webhook_headers()
             response = client.post(self.webhook_route, json=event, headers=headers)
-            time.sleep(0.5)
+
+            # Allow async handlers (e.g. !botpfp thread) to publish responses.
+            waited = 0.0
+            poll = 0.1
+            idle_window = 0.3
+            max_wait = 3.0
+            last_count = -1
+            stable_for = 0.0
+
+            while waited < max_wait:
+                current_count = len(self.sent_messages)
+                if current_count != last_count:
+                    last_count = current_count
+                    stable_for = 0.0
+                else:
+                    stable_for += poll
+
+                if waited >= 0.5 and stable_for >= idle_window:
+                    break
+
+                time.sleep(poll)
+                waited += poll
         except Exception as e:
             print(f"[ATTACHMENT TEST] Error: {e}")
         
@@ -1397,6 +1594,11 @@ class InteractiveTester:
         """
         import json
         
+        # If the tester has captured a runtime avatar update (e.g. !botpfp / !resetpfp),
+        # prefer that path first so GUI previews match command effects immediately.
+        if self.bot_display_pfp and os.path.isfile(self.bot_display_pfp):
+            return self.bot_display_pfp
+
         # Try to load active_skin.json
         active_skin_path = os.path.join(self.bot_dir, 'active_skin.json')
         

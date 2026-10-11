@@ -83,6 +83,7 @@ class BotTestTab:
         self.parent_gui = parent_gui
         self.tester = None  # Will be InteractiveTester instance when bot is loaded
         self.bot_path = None
+        self.bot_display_name = "ClankBot"
         self.photo_images = []  # Store image references to prevent garbage collection
         self.tab_number = tab_number
         
@@ -438,6 +439,42 @@ class SimpleBotTesterGUI:
         # Load initial bot if provided via command-line argument
         if initial_bot_path and os.path.isdir(initial_bot_path):
             self.root.after(100, lambda: self.load_bot_from_path(initial_bot_path))
+
+    def _resolve_bot_dir(self, bot_path):
+        """Resolve bot directory from either a folder path or app.py-like file path."""
+        if not bot_path:
+            return None
+        if os.path.isdir(bot_path):
+            return bot_path
+        return os.path.dirname(bot_path)
+
+    def _parse_simple_yaml_map(self, yaml_path):
+        """Parse simple key:value YAML pairs without requiring extra dependencies."""
+        values = {}
+        if not yaml_path or not os.path.exists(yaml_path):
+            return values
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.split("#", 1)[0].strip()
+                    if not line or ":" not in line:
+                        continue
+                    key, value = line.split(":", 1)
+                    values[key.strip()] = value.strip().strip("\"'")
+        except Exception as exc:
+            print(f"[GUI WARN] Could not parse {yaml_path}: {exc}")
+        return values
+
+    def _read_bot_display_name(self, bot_path):
+        """Read bot display name from botinfo.yaml (botname/name), with fallback."""
+        bot_dir = self._resolve_bot_dir(bot_path)
+        if not bot_dir:
+            return "ClankBot"
+        info = self._parse_simple_yaml_map(os.path.join(bot_dir, "botinfo.yaml"))
+        candidate = info.get("botname") or info.get("name")
+        if candidate:
+            return str(candidate).strip()
+        return Path(bot_dir).name or "ClankBot"
     
     def setup_ui(self):
         """Create the GUI layout with tabs."""
@@ -562,7 +599,7 @@ class SimpleBotTesterGUI:
             selected_index = self.notebook.index("current")
             if 0 <= selected_index < len(self.tabs):
                 self.current_tab = self.tabs[selected_index]
-                bot_name = Path(self.current_tab.bot_path).name if self.current_tab.bot_path else "No bot"
+                bot_name = self.current_tab.bot_display_name if self.current_tab.bot_path else "No bot"
                 self.status_label.config(text=f"Bot loaded: {bot_name}")
                 
                 # Sync UI controls to current tab's settings
@@ -795,8 +832,9 @@ class SimpleBotTesterGUI:
         
         self.current_tab.tester = tester
         self.current_tab.bot_path = bot_path
+        self.current_tab.bot_display_name = self._read_bot_display_name(bot_path)
         self.current_tab.update_tab_title()
-        self.status_label.config(text=f"Bot loaded: {Path(bot_path).name}")
+        self.status_label.config(text=f"Bot loaded: {self.current_tab.bot_display_name}")
         
         try:
             self.current_tab.display_message(f"[SUCCESS] Bot loaded from {bot_path}", is_bot=True)
@@ -884,6 +922,12 @@ class SimpleBotTesterGUI:
                     responses = self.current_tab.tester.test_message(text, user_role=user_role)
                 
                 print(f"[TEST DEBUG] test_message() returned {len(responses)} responses")
+
+                # Keep GUI bot label synced to runtime name changes (e.g. !botname / !resetname).
+                live_name = getattr(self.current_tab.tester, "bot_display_name", "")
+                if live_name and live_name != self.current_tab.bot_display_name:
+                    self.current_tab.bot_display_name = live_name
+                    self.root.after(0, lambda: self.status_label.config(text=f"Bot loaded: {live_name}"))
                 
                 # Get active skin PFP for display
                 bot_pfp = self.current_tab.tester.get_active_skin_pfp()
@@ -936,7 +980,7 @@ class SimpleBotTesterGUI:
                                 except:
                                     print("[DEBUG] Could not load PFP")
                                 
-                                name_label = tk.Label(content_frame, text="Clankbot:", font=("Arial", 10, "bold"), bg="#ffffff")
+                                name_label = tk.Label(content_frame, text=f"{self.current_tab.bot_display_name}:", font=("Arial", 10, "bold"), bg="#ffffff")
                                 name_label.pack(side=tk.LEFT, pady=5)
                                 
                                 pfp_displayed = True
@@ -1128,7 +1172,7 @@ class SimpleBotTesterGUI:
                 content_frame.pack(fill=tk.X)
                 
                 img_label.pack(in_=content_frame, side=tk.LEFT, padx=(0, 8), pady=5)
-                name_label = tk.Label(content_frame, text="Clankbot:", font=("Arial", 10, "bold"), bg="#ffffff")
+                name_label = tk.Label(content_frame, text=f"{self.current_tab.bot_display_name}:", font=("Arial", 10, "bold"), bg="#ffffff")
                 name_label.pack(side=tk.LEFT, pady=5)
             else:
                 # Regular image display - left-aligned for bot
