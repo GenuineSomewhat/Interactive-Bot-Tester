@@ -660,8 +660,9 @@ class InteractiveTester:
                 tester.sent_messages.append(msg_text)
                 response = {"text": msg_text}
                 attachments = []
-                if 'image_url' in kwargs:
-                    attachments.append({"type": "image", "url": kwargs['image_url']})
+                image_url = kwargs.get('image_url')
+                if image_url:
+                    attachments.append({"type": "image", "url": image_url})
                 mentions = kwargs.get('mentions')
                 if mentions:
                     attachments.append({

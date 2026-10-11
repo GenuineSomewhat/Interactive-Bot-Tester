@@ -31,10 +31,12 @@ if sys.stdout:
 
 class TerminalCapture:
     """Captures stdout/stderr and redirects to both console and GUI."""
-    def __init__(self, original_stdout):
+    def __init__(self, original_stdout, get_active_tab=None, refresh_terminal_callback=None):
         self.terminal_widget = None  # Set later after GUI is initialized
         self.original_stdout = original_stdout
         self.buffer = []
+        self.get_active_tab = get_active_tab
+        self.refresh_terminal_callback = refresh_terminal_callback
     
     def set_terminal_widget(self, widget):
         """Set the terminal widget after GUI is initialized."""
@@ -53,14 +55,26 @@ class TerminalCapture:
                     self.original_stdout.flush()
         except:
             pass
+
+        # Store terminal text on the active tab so each tab keeps isolated history.
+        try:
+            if callable(self.get_active_tab):
+                active_tab = self.get_active_tab()
+                if active_tab is not None and hasattr(active_tab, 'terminal_buffer'):
+                    active_tab.terminal_buffer.append(message)
+        except Exception:
+            pass
         
         # Add to GUI terminal if initialized
         if self.terminal_widget and message.strip():
             try:
-                self.terminal_widget.config(state=tk.NORMAL)
-                self.terminal_widget.insert(tk.END, message)
-                self.terminal_widget.see(tk.END)
-                self.terminal_widget.config(state=tk.DISABLED)
+                if callable(self.refresh_terminal_callback):
+                    self.refresh_terminal_callback()
+                else:
+                    self.terminal_widget.config(state=tk.NORMAL)
+                    self.terminal_widget.insert(tk.END, message)
+                    self.terminal_widget.see(tk.END)
+                    self.terminal_widget.config(state=tk.DISABLED)
             except:
                 pass
     
@@ -84,6 +98,7 @@ class BotTestTab:
         self.tester = None  # Will be InteractiveTester instance when bot is loaded
         self.bot_path = None
         self.bot_display_name = "ClankBot"
+        self.terminal_buffer = []  # Per-tab terminal history
         self.photo_images = []  # Store image references to prevent garbage collection
         self.tab_number = tab_number
         
@@ -427,7 +442,11 @@ class SimpleBotTesterGUI:
             return
         
         # NOW set up stdout/stderr capture (AFTER setup_ui completes)
-        self.terminal_capture = TerminalCapture(self.original_stdout)
+        self.terminal_capture = TerminalCapture(
+            self.original_stdout,
+            get_active_tab=lambda: self.current_tab,
+            refresh_terminal_callback=self._refresh_terminal_for_current_tab,
+        )
         sys.stdout = self.terminal_capture
         sys.stderr = self.terminal_capture
         
@@ -601,6 +620,7 @@ class SimpleBotTesterGUI:
                 self.current_tab = self.tabs[selected_index]
                 bot_name = self.current_tab.bot_display_name if self.current_tab.bot_path else "No bot"
                 self.status_label.config(text=f"Bot loaded: {bot_name}")
+                self._refresh_terminal_for_current_tab()
                 
                 # Sync UI controls to current tab's settings
                 self.role_var.set(self.current_tab.current_user_role)
@@ -616,6 +636,27 @@ class SimpleBotTesterGUI:
                     print(f"[TAB SWITCH] Switched to tab with {len(self.current_tab.chat_frame.winfo_children())} messages")
         except Exception as e:
             print(f"[TAB ERROR] {e}")
+
+    def _refresh_terminal_for_current_tab(self):
+        """Render the active tab's terminal history into the shared terminal widget."""
+        if not self.terminal_widget:
+            return
+        try:
+            content = ""
+            if self.current_tab and hasattr(self.current_tab, 'terminal_buffer'):
+                content = "".join(self.current_tab.terminal_buffer)
+
+            self.terminal_widget.config(state=tk.NORMAL)
+            self.terminal_widget.delete("1.0", tk.END)
+            if content:
+                self.terminal_widget.insert(tk.END, content)
+            self.terminal_widget.see(tk.END)
+            self.terminal_widget.config(state=tk.DISABLED)
+        except Exception as exc:
+            try:
+                print(f"[TERMINAL REFRESH ERROR] {exc}")
+            except Exception:
+                pass
     
     def _on_notebook_click(self, event):
         """Handle clicks on notebook tabs - detect close button clicks."""
@@ -662,6 +703,7 @@ class SimpleBotTesterGUI:
         self.tabs.append(tab)
         self.current_tab = tab
         self.notebook.select(len(self.tabs) - 1)
+        self._refresh_terminal_for_current_tab()
         
         # Bind click to detect close button
         self.notebook.bind("<Button-1>", self._on_notebook_click)
@@ -841,6 +883,8 @@ class SimpleBotTesterGUI:
             self.current_tab.display_message(f"Webhook route: {self.current_tab.tester.webhook_route}", is_bot=True)
         except:
             print("[DEBUG] Could not display success messages")
+
+        self._refresh_terminal_for_current_tab()
         
         self.input_field.focus()
         self.current_tab.photo_images = []  # Clear cached images
